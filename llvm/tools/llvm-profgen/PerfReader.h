@@ -153,6 +153,14 @@ struct PerfSample {
   // Call stack recorded in FILO(leaf to root) order, it's used for CS-profile
   // generation
   SmallVector<uint64_t, 16> CallStack;
+  
+  // sampled instruction pointer
+  uint64_t IP = 0;
+
+  // integer argument registers (RDI, RSI, RDX, RCX, R8, R9)
+  SmallVector<uint64_t, 6> IntArgs = SmallVector<uint64_t, 6>(6, 0);
+  // floating point register arguments (XMM0-XMM7)
+  SmallVector<uint64_t, 8> FpArgs = SmallVector<uint64_t, 8>(8, 0);
 
   virtual ~PerfSample() = default;
   uint64_t getHashCode() const {
@@ -168,6 +176,17 @@ struct PerfSample {
       Hash = HashCombine(Hash, Entry.Source);
       Hash = HashCombine(Hash, Entry.Target);
     }
+
+    // Include argument registers in hash
+    // Integer Argument Registers 
+    for (const auto &Arg : IntArgs) {
+      Hash = HashCombine(Hash, Arg);
+    }
+    // Floating point Argument Registers 
+    for (const auto &Arg : FpArgs) {
+      Hash = HashCombine(Hash, Arg);
+    }
+    
     return Hash;
   }
 
@@ -187,6 +206,13 @@ struct PerfSample {
           LBRStack[I].Target != OtherLBRStack[I].Target)
         return false;
     }
+  
+
+    // Compare argument registers
+    if (!std::equal(IntArgs.begin(), IntArgs.end(), Other->IntArgs.begin()) ||
+        !std::equal(FpArgs.begin(), FpArgs.end(), Other->FpArgs.begin()))
+      return false;
+    
     return true;
   }
 
