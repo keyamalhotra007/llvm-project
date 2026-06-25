@@ -813,7 +813,7 @@ void PerfScriptReader::buildArgumentValueProfile() {
     // Use the sampled IP directly as the call site. Only meaningful if this
     // address is actually a call instruction in the binary.
     uint64_t CallSitePC = Sample->IP;
-    if (!Binary->isCallInstruction(CallSitePC)) //PLACEHOLDER, replace with a real callsite check
+    if (!Binary->addressIsCall(CallSitePC)) //PLACEHOLDER, replace with a real callsite check
       continue;
 
     for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot) {
