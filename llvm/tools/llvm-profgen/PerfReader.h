@@ -167,6 +167,9 @@ struct PerfSample {
     bool operator==(const FPArgReg &Other) const {
       return Lo == Other.Lo && Hi == Other.Hi;
     }
+    bool operator<(const FPArgReg &Other) const {
+      return Lo != Other.Lo ? Lo < Other.Lo : Hi < Other.Hi;
+    }
   };
 
   SmallVector<FPArgReg, 8> FpArgs = SmallVector<FPArgReg, 8>(8, FPArgReg());
@@ -193,7 +196,8 @@ struct PerfSample {
     }
     // Floating point Argument Registers 
     for (const auto &Arg : FpArgs) {
-      Hash = HashCombine(Hash, Arg);
+      Hash = HashCombine(Hash, Arg.Lo);
+      Hash = HashCombine(Hash, Arg.Hi);
     }
     
     
@@ -648,6 +652,8 @@ public:
   // receiving signals.
   static SmallVector<CleanupInstaller, 2> TempFileCleanups;
 
+  void buildArgumentValueProfile();
+
 protected:
   // The parsed MMap event
   struct MMapEvent {
@@ -688,8 +694,7 @@ protected:
                        SmallVectorImpl<LBREntry> &LBRStack);
 
   // Extract Argument Registers from one perf trace line
-  bool extractRegisters(TraceStream &TraceIt, PerfSample &Sample,
-                    SmallVectorImpl<uint64_t> &IntArgs, SmallVectorImpl<uint64_t> &FpArgs);
+  bool extractRegisters(TraceStream &TraceIt, PerfSample &Sample);
 
   uint64_t parseAggregatedCount(TraceStream &TraceIt);
   // Parse one sample from multiple perf lines, override this for different
@@ -710,7 +715,8 @@ protected:
 
   //Count occurances of argument register values at callsites
   std::unordered_map<uint64_t, std::array<std::map<uint64_t, uint64_t>, 6>> IntArgHistograms;
-  std::unordered_map<uint64_t, std::array<std::map<FPArgReg, uint64_t>, 8>> FpArgHistograms;
+  std::unordered_map<uint64_t, std::array<std::map<PerfSample::FPArgReg, uint64_t>, 8>> FpArgHistograms;
+
 
 
   // Keep track of all invalid return addresses

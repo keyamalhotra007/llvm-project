@@ -722,8 +722,7 @@ bool PerfScriptReader::extractCallstack(TraceStream &TraceIt,
 }
 
 // 
-bool PerfScriptReader::extractRegisters(TraceStream &TraceIt, PerfSample &Sample,
-                                      SmallVectorImpl<uint64_t> &IntArgs, SmallVectorImpl<uint64_t> &FpArgs) {
+bool PerfScriptReader::extractRegisters(TraceStream &TraceIt, PerfSample &Sample){
   // Raw format: <ip_hex> ABI:2  NAME:0xVAL  NAME:0xVAL  ...
   // GPR names appear once each; XMM names appear twice each (lo/hi half)
   SmallVector<StringRef, 64> Tokens;
@@ -865,8 +864,7 @@ void HybridPerfReader::parseSample(TraceStream &TraceIt, uint64_t Count) {
 
   if (!TraceIt.isAtEoF() && TraceIt.getCurrentLine().starts_with(" 0x")) {
     // Parse registers first if present on this line
-    SmallVector<uint64_t, 6> IntArgsDummy, FpArgsDummy;
-    extractRegisters(TraceIt, *Sample, IntArgsDummy, FpArgsDummy);
+    extractRegisters(TraceIt, *Sample);
     // Parsing LBR stack and populate into PerfSample.LBRStack
     if (extractLBRStack(TraceIt, Sample->LBRStack)) {
       if (IgnoreStackSamples) {
@@ -1060,7 +1058,7 @@ void PerfScriptReader::computeCounterFromLBR(const PerfSample *Sample,
 
 void LBRPerfReader::parseSample(TraceStream &TraceIt, uint64_t Count) {
   std::shared_ptr<PerfSample> Sample = std::make_shared<PerfSample>();
-    extractRegisters(TraceIt, *Sample, Sample->IntArgs, Sample->FpArgs);
+    extractRegisters(TraceIt, *Sample);
   // Reset to same line to parse LBR (extractRegisters didn't advance)
   // Parsing LBR stack and populate into PerfSample. LBRStack
   if (extractLBRStack(TraceIt, Sample->LBRStack)) {
