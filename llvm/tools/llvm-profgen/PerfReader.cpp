@@ -13,6 +13,7 @@
 #include "llvm/Support/Process.h"
 #include "llvm/Support/ToolOutputFile.h"
 
+
 #define DEBUG_TYPE "perf-reader"
 
 cl::opt<bool> SkipSymbolization("skip-symbolization",
@@ -427,7 +428,7 @@ PerfScriptReader::convertPerfDataToTrace(ProfiledBinary *Binary, bool SkipPID,
   ScriptSampleArgs.push_back("script");
   ScriptSampleArgs.push_back("--show-mmap-events");
   ScriptSampleArgs.push_back("-F");
-  ScriptSampleArgs.push_back("ip,brstack");
+  ScriptSampleArgs.push_back("ip,brstack,iregs");
   ScriptSampleArgs.push_back("-i");
   ScriptSampleArgs.push_back(PerfData);
   if (!PIDs.empty()) {
@@ -580,9 +581,10 @@ bool PerfScriptReader::extractLBRStack(TraceStream &TraceIt,
                                        SmallVectorImpl<LBREntry> &LBRStack) {
   // The raw format of LBR stack is like:
   // 0x4005c8/0x4005dc/P/-/-/0 0x40062f/0x4005b0/P/-/-/0 ...
-  //                           ... 0x4005c8/0x4005dc/P/-/-/0
+  // Or with registers:
+  // IP ABI:2 AX:0x... DX:0x... ... 0x4005c8/0x4005dc/P/-/-/0 0x40062f/0x4005b0/P/-/-/0 ...
   // It's in FIFO order and separated by whitespace.
-  SmallVector<StringRef, 32> Records;
+  SmallVector<StringRef, 64> Records;
   TraceIt.getCurrentLine().rtrim().split(Records, " ", -1, false);
   auto WarnInvalidLBR = [](TraceStream &TraceIt) {
     WithColor::warning() << "Invalid address in LBR record at line "
@@ -590,7 +592,9 @@ bool PerfScriptReader::extractLBRStack(TraceStream &TraceIt,
                          << TraceIt.getCurrentLine() << "\n";
   };
 
-  // Skip the leading instruction pointer.
+  // Skip the leading instruction pointer, ABI and register fields.
+  // Register fields contain ':' (e.g. AX:0x123)
+  // LBR entries contain '/' (e.g., 0x123/0x456/)
   size_t Index = 0;
   uint64_t LeadingAddr;
   if (!Records.empty() && !Records[0].contains('/')) {
@@ -600,6 +604,11 @@ bool PerfScriptReader::extractLBRStack(TraceStream &TraceIt,
       return false;
     }
     Index = 1;
+    
+    // Skip past all register tokens (they contain ':' but not '/')
+    while (Index < Records.size() && Records[Index].contains(':') && !Records[Index].contains('/')) {
+      Index++;
+    }
   }
 
   // Now extract LBR samples - note that we do not reverse the
@@ -637,7 +646,6 @@ bool PerfScriptReader::extractLBRStack(TraceStream &TraceIt,
 
     LBRStack.emplace_back(LBREntry(Src, Dst));
   }
-  TraceIt.advance();
   return !LBRStack.empty();
 }
 
@@ -666,7 +674,7 @@ bool PerfScriptReader::extractCallstack(TraceStream &TraceIt,
     if (!Binary->addressIsCode(FrameAddr)) {
       if (CallStack.empty())
         NumLeafExternalFrame++;
-      // Push a special value(ExternalAddr) for the external frames so that
+      // Push a special value(ExternalAddr) for the external frames so that=
       // unwinder can still work on this with artificial Call/Return branch.
       // After unwinding, the context will be truncated for external frame.
       // Also deduplicate the consecutive external addresses.
@@ -713,6 +721,111 @@ bool PerfScriptReader::extractCallstack(TraceStream &TraceIt,
          !Binary->addressInPrologEpilog(CallStack.front());
 }
 
+// 
+bool PerfScriptReader::extractRegisters(TraceStream &TraceIt, PerfSample &Sample,
+                                      SmallVectorImpl<uint64_t> &IntArgs, SmallVectorImpl<uint64_t> &FpArgs) {
+  // Raw format: <ip_hex> ABI:2  NAME:0xVAL  NAME:0xVAL  ...
+  // GPR names appear once each; XMM names appear twice each (lo/hi half)
+  SmallVector<StringRef, 64> Tokens;
+  TraceIt.getCurrentLine().rtrim().split(Tokens, ' ', -1, false);
+
+  auto WarnInvalidRecord = [](TraceStream &TraceIt) {
+    WithColor::warning() << "Invalid register record at line "
+                         << TraceIt.getLineNumber() << ": "
+                         << TraceIt.getCurrentLine() << "\n";
+  };
+
+  // save leading instruction pointer 
+  size_t Index = 0;
+  uint64_t LeadingAddr = 0;
+  if (!Tokens.empty() && !Tokens[0].contains(':')) {
+    if (Tokens[0].getAsInteger(16, LeadingAddr)) {
+      WarnInvalidRecord(TraceIt);
+      TraceIt.advance();
+      return false;
+    }
+    Index = 1;
+    Sample.IP = LeadingAddr;
+  }
+
+  // Track whether we've seen the low/high halves for each XMM register.
+  std::array<int, 8> XMMSeen = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    // Integer argument name -> index mapping 
+    const std::unordered_map<std::string, int> IntArgRegs = {
+      {"DI", 0}, {"SI", 1}, {"DX", 2}, {"CX", 3}, {"R8", 4}, {"R9", 5}};
+
+  while (Index < Tokens.size()) {
+    auto &Token = Tokens[Index++];
+    if (Token.empty())
+      continue;
+
+    auto Pair = Token.split(':');
+    StringRef Name = Pair.first;
+    StringRef ValueStr = Pair.second;
+
+    if (Name == "ABI") {
+      uint64_t ABIValue = 0;
+      if (ValueStr.getAsInteger(10, ABIValue) || ABIValue != 2) {
+        WarnInvalidRecord(TraceIt);
+        continue;
+      }
+      continue;
+    }
+
+    if (ValueStr.empty() || !ValueStr.starts_with("0x"))
+      continue;
+
+    uint64_t Val = 0;
+    if (ValueStr.substr(2).getAsInteger(16, Val))
+      continue;
+
+    if (Name.starts_with("XMM")) {
+      StringRef IdxStr = Name.substr(3);
+      uint64_t RegIndex = 0;
+      if (IdxStr.getAsInteger(10, RegIndex) || RegIndex >= Sample.FpArgs.size())
+        continue;
+
+      if (XMMSeen[RegIndex] == 0)
+        Sample.FpArgs[RegIndex].Lo = Val;
+      else if (XMMSeen[RegIndex] == 1)
+        Sample.FpArgs[RegIndex].Hi = Val;
+      if (XMMSeen[RegIndex] < 2)
+        XMMSeen[RegIndex]++;
+      continue;
+    }
+
+    auto It = IntArgRegs.find(Name.str());
+    if (It != IntArgRegs.end()) {
+      Sample.IntArgs[It->second] = Val;
+      continue;
+    }
+  }
+
+  return true;
+}
+
+void PerfScriptReader::buildArgumentValueProfile() {
+  for (const auto &Item : AggregatedSamples) {
+    const PerfSample *Sample = Item.first.getPtr();
+    uint64_t Count = Item.second; //count for this unique (LBRstack, argument registers) combination
+
+    // Use the sampled IP directly as the call site. Only meaningful if this
+    // address is actually a call instruction in the binary.
+    uint64_t CallSitePC = Sample->IP;
+    if (!Binary->isCallInstruction(CallSitePC)) //PLACEHOLDER, replace with a real callsite check
+      continue;
+
+    for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot) {
+      IntArgHistograms[CallSitePC][Slot][Sample->IntArgs[Slot]] += Count;
+    }
+
+    for (size_t Slot = 0; Slot < Sample->FpArgs.size(); ++Slot) {
+      FpArgHistograms[CallSitePC][Slot][Sample->FpArgs[Slot]] += Count;
+    }
+  }
+}
+
 void PerfScriptReader::warnIfMissingMMap() {
   if (!Binary->getMissingMMapWarned() && !Binary->getIsLoadedByMMap()) {
     WithColor::warning() << "No relevant mmap event is matched for "
@@ -751,6 +864,9 @@ void HybridPerfReader::parseSample(TraceStream &TraceIt, uint64_t Count) {
   warnIfMissingMMap();
 
   if (!TraceIt.isAtEoF() && TraceIt.getCurrentLine().starts_with(" 0x")) {
+    // Parse registers first if present on this line
+    SmallVector<uint64_t, 6> IntArgsDummy, FpArgsDummy;
+    extractRegisters(TraceIt, *Sample, IntArgsDummy, FpArgsDummy);
     // Parsing LBR stack and populate into PerfSample.LBRStack
     if (extractLBRStack(TraceIt, Sample->LBRStack)) {
       if (IgnoreStackSamples) {
@@ -763,6 +879,7 @@ void HybridPerfReader::parseSample(TraceStream &TraceIt, uint64_t Count) {
       // Record samples by aggregation
       AggregatedSamples[Hashable<PerfSample>(Sample)] += Count;
     }
+    TraceIt.advance();
   } else {
     // LBR sample is encoded in single line after stack sample
     exitWithError("'Hybrid perf sample is corrupted, No LBR sample line");
@@ -943,12 +1060,15 @@ void PerfScriptReader::computeCounterFromLBR(const PerfSample *Sample,
 
 void LBRPerfReader::parseSample(TraceStream &TraceIt, uint64_t Count) {
   std::shared_ptr<PerfSample> Sample = std::make_shared<PerfSample>();
-  // Parsing LBR stack and populate into PerfSample.LBRStack
+    extractRegisters(TraceIt, *Sample, Sample->IntArgs, Sample->FpArgs);
+  // Reset to same line to parse LBR (extractRegisters didn't advance)
+  // Parsing LBR stack and populate into PerfSample. LBRStack
   if (extractLBRStack(TraceIt, Sample->LBRStack)) {
     warnIfMissingMMap();
     // Record LBR only samples by aggregation
     AggregatedSamples[Hashable<PerfSample>(Sample)] += Count;
   }
+  TraceIt.advance();
 }
 
 void PerfScriptReader::generateUnsymbolizedProfile() {
@@ -1071,16 +1191,20 @@ void PerfScriptReader::parseAndAggregateTrace() {
 
 // A LBR sample is like:
 // 40062f 0x5c6313f/0x5c63170/P/-/-/0  0x5c630e7/0x5c63130/P/-/-/0 ...
-// A heuristic for fast detection by checking whether a
-// leading "  0x" and the '/' exist.
+// or with registers:
+// IP ABI:2 AX:0x... ... 0x5c6313f/0x5c63170/P/-/-/0 0x5c630e7/0x5c63130/P/-/-/0 ...
+// A heuristic for fast detection by checking for patterns with "/" that start with "0x"
 bool PerfScriptReader::isLBRSample(StringRef Line) {
-  // Skip the leading instruction pointer
-  SmallVector<StringRef, 32> Records;
-  Line.trim().split(Records, " ", 2, false);
-  if (Records.size() < 2)
-    return false;
-  if (Records[1].starts_with("0x") && Records[1].contains('/'))
-    return true;
+  // Look for LBR entries: 0x.../0x.../ pattern anywhere in the line
+  // Split by spaces and check each token
+  SmallVector<StringRef, 64> Tokens;
+  Line.trim().split(Tokens, " ", -1, false);
+  
+  for (const auto &Token : Tokens) {
+    // LBR tokens start with 0x and contain / for source/destination pair
+    if (Token.starts_with("0x") && Token.contains('/'))
+      return true;
+  }
   return false;
 }
 
@@ -1274,6 +1398,7 @@ void PerfScriptReader::parsePerfTraces() {
   warnTruncatedStack();
   warnInvalidRange();
   generateUnsymbolizedProfile();
+  buildArgumentValueProfile();
   AggregatedSamples.clear();
 
   if (SkipSymbolization)
