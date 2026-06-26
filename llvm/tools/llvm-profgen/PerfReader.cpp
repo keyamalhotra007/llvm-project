@@ -744,7 +744,7 @@ bool PerfScriptReader::extractRegisters(TraceStream &TraceIt, PerfSample &Sample
       return false;
     }
     Index = 1;
-    Sample.IP = LeadingAddr;
+    Sample.IP = Binary->canonicalizeVirtualAddress(LeadingAddr);
   }
 
   // Track whether we've seen the low/high halves for each XMM register.
@@ -812,18 +812,19 @@ void PerfScriptReader::buildArgumentValueProfile() {
     // Use the sampled IP directly as the call site. Only meaningful if this
     // address is actually a call instruction in the binary.
     uint64_t CallSitePC = Sample->IP;
-    if (!Binary->addressIsCall(CallSitePC)) //PLACEHOLDER, replace with a real callsite check
+    if (!Binary->addressIsCall(CallSitePC))
       continue;
 
     for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot) {
       IntArgHistograms[CallSitePC][Slot][Sample->IntArgs[Slot]] += Count;
     }
-
     for (size_t Slot = 0; Slot < Sample->FpArgs.size(); ++Slot) {
       FpArgHistograms[CallSitePC][Slot][Sample->FpArgs[Slot]] += Count;
     }
   }
+  
 }
+
 
 void PerfScriptReader::warnIfMissingMMap() {
   if (!Binary->getMissingMMapWarned() && !Binary->getIsLoadedByMMap()) {
