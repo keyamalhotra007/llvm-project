@@ -807,22 +807,24 @@ bool PerfScriptReader::extractRegisters(TraceStream &TraceIt, PerfSample &Sample
 void PerfScriptReader::buildArgumentValueProfile() {
   for (const auto &Item : AggregatedSamples) {
     const PerfSample *Sample = Item.first.getPtr();
-    uint64_t Count = Item.second; //count for this unique (LBRstack, argument registers) combination
+    uint64_t Count = Item.second;
 
-    // Use the sampled IP directly as the call site. Only meaningful if this
-    // address is actually a call instruction in the binary.
     uint64_t CallSitePC = Sample->IP;
     if (!Binary->addressIsCall(CallSitePC))
       continue;
 
-    for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot) {
-      IntArgHistograms[CallSitePC][Slot][Sample->IntArgs[Slot]] += Count;
-    }
-    for (size_t Slot = 0; Slot < Sample->FpArgs.size(); ++Slot) {
-      FpArgHistograms[CallSitePC][Slot][Sample->FpArgs[Slot]] += Count;
-    }
+    // Get (or create) the profile for this call site.
+    auto &Profile = ArgumentProfiles[CallSitePC];
+
+    // Integer arguments.
+    for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot)
+      Profile.IntSlots[Slot][Sample->IntArgs[Slot]] += Count;
+
+    // Floating-point arguments.
+    for (size_t Slot = 0; Slot < Sample->FpArgs.size(); ++Slot)
+      Profile.FpSlots[Slot][Sample->FpArgs[Slot]] += Count;
   }
-  
+
 }
 
 
