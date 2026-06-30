@@ -88,6 +88,7 @@ struct LBREntry {
   uint64_t Target = 0;
   LBREntry(uint64_t S, uint64_t T) : Source(S), Target(T) {}
 
+
 #ifndef NDEBUG
   void print() const {
     dbgs() << "from " << format("%#010x", Source) << " to "
@@ -95,6 +96,7 @@ struct LBREntry {
   }
 #endif
 };
+
 
 #ifndef NDEBUG
 static inline void printLBRStack(const SmallVectorImpl<LBREntry> &LBRStack) {
@@ -244,6 +246,19 @@ struct PerfSample {
   }
 #endif
 };
+
+struct CallSiteArgumentProfile {
+   std::array<
+       std::map<uint64_t,uint64_t>, 6> IntSlots;
+
+
+   std::array<
+       std::map<PerfSample::FPArgReg,uint64_t>, 8> FpSlots;
+ };
+
+ extern std::unordered_map<uint64_t, CallSiteArgumentProfile> ArgumentProfiles;
+
+
 // After parsing the sample, we record the samples by aggregating them
 // into this counter. The key stores the sample data and the value is
 // the sample repeat times.
@@ -714,15 +729,7 @@ protected:
   AggregatedCounter AggregatedSamples;
 
 
-  struct CallSiteArgumentProfile {
-    std::unordered_map<size_t,
-        std::unordered_map<uint64_t,uint64_t>> IntSlots;
-
-    std::array<
-        std::map<PerfSample::FPArgReg,uint64_t>, 8> FpSlots;
-  };
-
-  std::unordered_map<uint64_t, CallSiteArgumentProfile> ArgumentProfiles;
+  
 
 
 

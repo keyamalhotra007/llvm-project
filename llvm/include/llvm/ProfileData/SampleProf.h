@@ -14,6 +14,7 @@
 #ifndef LLVM_PROFILEDATA_SAMPLEPROF_H
 #define LLVM_PROFILEDATA_SAMPLEPROF_H
 
+
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
@@ -738,6 +739,7 @@ inline raw_ostream &operator<<(raw_ostream &OS, const SampleContext &Context) {
   return OS << Context.toString();
 }
 
+
 class FunctionSamples;
 class SampleProfileReaderItaniumRemapper;
 
@@ -749,6 +751,23 @@ using CallsiteSampleMap = std::map<LineLocation, FunctionSamplesMap>;
 using LocToLocMap =
     std::unordered_map<LineLocation, LineLocation, LineLocationHash>;
 
+static constexpr unsigned MaxIntArgs = 6;
+static constexpr unsigned MaxFpArgs = 8;
+
+  struct FpValue {
+    uint64_t Lo;
+    uint64_t Hi;
+
+    bool operator==(const FpValue &Other) const {
+      return Lo == Other.Lo && Hi == Other.Hi;
+    }
+  };
+
+using IntFreqMap = DenseMap<uint64_t, uint64_t>;
+using FpFreqMap = DenseMap<FpValue, uint64_t>;
+
+using IntArgFreqMap = std::map<LineLocation, std::array<IntFreqMap, MaxIntArgs>>;
+using FpArgFreqMap = std::map<LineLocation, std::array<FpFreqMap, MaxFpArgs>>;
 /// Representation of the samples collected for a function.
 ///
 /// This data structure contains all the collected samples for the body
@@ -807,6 +826,41 @@ public:
                                    const SampleRecord &SampleRecord,
                                    uint64_t Weight = 1) {
     return BodySamples[Location].merge(SampleRecord, Weight);
+  }  
+
+  sampleprof_error addIntArgSample(uint32_t LineOffset, uint32_t Discriminator,
+                                    uint32_t ArgIndex, uint64_t Value,
+                                    uint64_t Count, uint64_t Weight = 1) {
+    assert(ArgIndex < MaxIntArgs && "ArgIndex out of range");
+    bool Overflowed;
+    uint64_t &CurrentCount =
+        IntArgsProfile[LineLocation(LineOffset, Discriminator)][ArgIndex][Value];
+
+    CurrentCount =
+        SaturatingMultiplyAdd(Count, Weight, CurrentCount, &Overflowed);
+
+    
+
+    return Overflowed ? sampleprof_error::counter_overflow
+                       : sampleprof_error::success;
+  }
+
+  sampleprof_error addFpArgSample(uint32_t LineOffset, uint32_t Discriminator,
+                                   uint32_t ArgIndex, FpValue Value,
+                                   uint64_t Count, uint64_t Weight = 1) {
+    assert(ArgIndex < MaxFpArgs && "ArgIndex out of range");
+    bool Overflowed;
+
+    LineLocation Loc(LineOffset, Discriminator);
+
+    uint64_t &CurrentCount =
+        FpArgsProfile[Loc][ArgIndex][Value];
+    
+    CurrentCount =
+        SaturatingMultiplyAdd(Count, Weight, CurrentCount, &Overflowed);
+    
+    return Overflowed ? sampleprof_error::counter_overflow
+                       : sampleprof_error::success;
   }
 
   // Remove a call target and decrease the body sample correspondingly. Return
@@ -987,6 +1041,8 @@ public:
   /// Return all the callsite samples collected in the body of the function.
   const CallsiteSampleMap &getCallsiteSamples() const {
     return CallsiteSamples;
+
+  
   }
 
   /// Return the maximum of sample counts in a function body. When SkipCallSite
@@ -1304,6 +1360,10 @@ private:
   /// 1], the profile query using the location of bar on the IR which is 2 will
   /// be remapped to 1 and find the location of bar in the profile.
   const LocToLocMap *IRToProfileLocationMap = nullptr;
+
+  /// TODO Add description 
+  IntArgFreqMap IntArgsProfile;
+  FpArgFreqMap FpArgsProfile;
 };
 
 /// Get the proper representation of a string according to whether the
@@ -1562,6 +1622,7 @@ private:
 
 } // end namespace sampleprof
 
+
 using namespace sampleprof;
 // Provide DenseMapInfo for SampleContext.
 template <> struct DenseMapInfo<SampleContext> {
@@ -1579,6 +1640,21 @@ template <> struct DenseMapInfo<SampleContext> {
     return LHS == RHS;
   }
 };
+
+// Provide DenseMapInfo for FunctionSamples::FpValue  
+
+template <> struct DenseMapInfo<sampleprof::FpValue> {
+  static inline sampleprof::FpValue getEmptyKey() { return {~0ULL, ~0ULL}; }
+  static inline sampleprof::FpValue getTombstoneKey() { return {~0ULL - 1, ~0ULL - 1}; }
+  static unsigned getHashValue(const sampleprof::FpValue &V) {
+    return (unsigned)hash_combine(V.Lo, V.Hi);
+  }
+  static bool isEqual(const sampleprof::FpValue &LHS, const sampleprof::FpValue &RHS) {
+    return LHS == RHS;
+  }
+};
+
+
 
 // Prepend "__uniq" before the hash for tools like profilers to understand
 // that this symbol is of internal linkage type.  The "__uniq" is the

@@ -158,8 +158,9 @@ class ProfileGenerator : public ProfileGeneratorBase {
 
 public:
   ProfileGenerator(ProfiledBinary *Binary,
-                   const ContextSampleCounterMap *Counters)
-      : ProfileGeneratorBase(Binary, Counters){};
+                   const ContextSampleCounterMap *Counters,
+                   const std::unordered_map<uint64_t, CallSiteArgumentProfile> *ArgumentProfiles)
+      : ProfileGeneratorBase(Binary, Counters), ArgumentProfiles(ArgumentProfiles){};
   ProfileGenerator(ProfiledBinary *Binary, const SampleProfileMap &&Profiles)
       : ProfileGeneratorBase(Binary, std::move(Profiles)){};
   void generateProfile() override;
@@ -178,6 +179,10 @@ private:
   void populateBodySamplesForAllFunctions(const RangeSample &RangeCounter);
   void
   populateBoundarySamplesForAllFunctions(const BranchSample &BranchCounters);
+
+  const std::unordered_map<uint64_t, CallSiteArgumentProfile> *ArgumentProfiles = nullptr;
+  void populateFunctionArgumentProfile(const std::unordered_map<uint64_t, CallSiteArgumentProfile> &ArgumentProfiles);
+
   void
   populateBodySamplesWithProbesForAllFunctions(const RangeSample &RangeCounter);
   void populateBoundarySamplesWithProbesForAllFunctions(

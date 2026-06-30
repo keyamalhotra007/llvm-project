@@ -126,7 +126,7 @@ ProfileGeneratorBase::create(ProfiledBinary *Binary,
   if (ProfileIsCS) {
     Generator.reset(new CSProfileGenerator(Binary, SampleCounters));
   } else {
-    Generator.reset(new ProfileGenerator(Binary, SampleCounters));
+    Generator.reset(new ProfileGenerator(Binary, SampleCounters, &ArgumentProfiles));
   }
   ProfileGeneratorBase::UseFSDiscriminator = Binary->useFSDiscriminator();
   FunctionSamples::ProfileIsFS = Binary->useFSDiscriminator();
@@ -540,6 +540,9 @@ void ProfileGenerator::generateLineNumBasedProfile() {
   // Fill in boundary sample counts as well as call site samples for calls
   populateBoundarySamplesForAllFunctions(SC.BranchCounter);
 
+  if (ArgumentProfiles)
+    populateFunctionArgumentProfile(*ArgumentProfiles);
+
   updateFunctionSamples();
 }
 
@@ -703,6 +706,7 @@ void ProfileGenerator::populateBodySamplesForAllFunctions(
   }
 }
 
+
 StringRef
 ProfileGeneratorBase::getCalleeNameForAddress(uint64_t TargetAddress) {
   // Get the function range by branch target if it's a call branch.
@@ -744,6 +748,42 @@ void ProfileGenerator::populateBoundarySamplesForAllFunctions(
     CalleeProfile.addHeadSamples(Count);
   }
 }
+
+void ProfileGenerator::populateFunctionArgumentProfile(
+    const std::unordered_map<uint64_t, CallSiteArgumentProfile> &ArgumentProfiles) {
+
+  for (const auto &[CallSiteAddress, Profile] : ArgumentProfiles) {
+
+    const SampleContextFrameVector &FrameVec =
+        Binary->getCachedFrameLocationStack(CallSiteAddress);
+
+    if (FrameVec.empty())
+      continue;
+
+    FunctionSamples &FunctionProfile =
+        getLeafProfileAndAddTotalSamples(FrameVec, 0);
+
+    uint32_t LineOffset = FrameVec.back().Location.LineOffset;
+    uint32_t Discriminator =
+        getBaseDiscriminator(FrameVec.back().Location.Discriminator);
+
+
+    for (uint32_t Slot = 0; Slot < sampleprof::MaxIntArgs; ++Slot) {
+      for (const auto &[Value, Count] : Profile.IntSlots[Slot]) {
+        FunctionProfile.addIntArgSample(LineOffset, Discriminator, Slot, Value, Count);
+      }
+    }
+
+    for (uint32_t Slot = 0; Slot < sampleprof::MaxFpArgs; ++Slot) {
+      for (const auto &[FPVal, Count] : Profile.FpSlots[Slot]) {
+        sampleprof::FpValue V{FPVal.Lo, FPVal.Hi};
+        FunctionProfile.addFpArgSample(LineOffset, Discriminator, Slot, V, Count);
+      }
+    }
+  }
+}
+
+
 
 void ProfileGeneratorBase::calculateBodySamplesAndSize(
     const FunctionSamples &FSamples, uint64_t &TotalBodySamples,

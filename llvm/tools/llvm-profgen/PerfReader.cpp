@@ -47,6 +47,7 @@ static cl::opt<int> CSProfMaxUnsymbolizedCtxDepth(
     "csprof-max-unsymbolized-context-depth", cl::init(-1),
     cl::desc("Keep the last K contexts while merging unsymbolized profile. -1 "
              "means no depth limit."));
+      
 
 extern cl::opt<std::string> PerfTraceFilename;
 extern cl::opt<bool> ShowDisassemblyOnly;
@@ -55,6 +56,8 @@ extern cl::opt<std::string> OutputFilename;
 
 namespace llvm {
 namespace sampleprof {
+
+std::unordered_map<uint64_t, CallSiteArgumentProfile> ArgumentProfiles;
 
 void VirtualUnwinder::unwindCall(UnwindState &State) {
   uint64_t Source = State.getCurrentLBRSource();
