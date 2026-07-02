@@ -763,6 +763,10 @@ static constexpr unsigned MaxFpArgs = 8;
     }
   };
 
+  inline raw_ostream &operator<<(raw_ostream &OS, const FpValue &V) {
+    return OS << V.Lo << ":" << V.Hi;
+  }
+
 } // end namespace sampleprof
 
 // DenseMapInfo for FunctionSamples::FpValue before any DenseMap instantiation uses it.

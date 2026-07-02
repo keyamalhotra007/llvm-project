@@ -201,6 +201,44 @@ void FunctionSamples::print(raw_ostream &OS, unsigned Indent) const {
   }
 
   OS.indent(Indent);
+  if (!IntArgsProfile.empty()) {
+    OS << "Integer Argument value samples {\n";
+    for (const auto &CS : IntArgsProfile) {
+      OS.indent(Indent + 2);
+      OS << CS.first << ": ";
+      for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
+        if (CS.second[Slot].empty()) continue;
+        OS << "arg" << Slot << "[";
+        for (const auto &V : CS.second[Slot])
+          OS << V.first << ":" << V.second << " ";
+        OS << "] ";
+      }
+      OS << "\n";
+    }
+    OS.indent(Indent);
+    OS << "}\n";
+  }
+
+  OS.indent(Indent);
+  if (!FpArgsProfile.empty()) {
+    OS << "Floating Point Argument value samples {\n";
+    for (const auto &CS : FpArgsProfile) {
+      OS.indent(Indent + 2);
+      OS << CS.first << ": ";
+      for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
+        if (CS.second[Slot].empty()) continue;
+        OS << "arg" << Slot << "[";
+        for (const auto &V : CS.second[Slot])
+          OS << V.first << ":" << V.second << " ";
+        OS << "] ";
+      }
+      OS << "\n";
+    }
+    OS.indent(Indent);
+    OS << "}\n";
+  }
+
+  OS.indent(Indent);
   if (!CallsiteSamples.empty()) {
     OS << "Samples collected in inlined callsites {\n";
     SampleSorter<LineLocation, FunctionSamplesMap> SortedCallsiteSamples(
