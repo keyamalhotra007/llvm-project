@@ -763,6 +763,25 @@ static constexpr unsigned MaxFpArgs = 8;
     }
   };
 
+} // end namespace sampleprof
+
+// DenseMapInfo for FunctionSamples::FpValue before any DenseMap instantiation uses it.
+template <> struct DenseMapInfo<sampleprof::FpValue, void> {
+  static inline sampleprof::FpValue getEmptyKey() { return {~0ULL, ~0ULL}; }
+  static inline sampleprof::FpValue getTombstoneKey() {
+    return {~0ULL - 1, ~0ULL - 1};
+  }
+  static unsigned getHashValue(const sampleprof::FpValue &V) {
+    return (unsigned)hash_combine(V.Lo, V.Hi);
+  }
+  static bool isEqual(const sampleprof::FpValue &LHS,
+                      const sampleprof::FpValue &RHS) {
+    return LHS == RHS;
+  }
+};
+
+namespace sampleprof {
+
 using IntFreqMap = DenseMap<uint64_t, uint64_t>;
 using FpFreqMap = DenseMap<FpValue, uint64_t>;
 
@@ -1045,6 +1064,14 @@ public:
   
   }
 
+  const IntArgFreqMap &getIntArgsProfile() const {
+    return IntArgsProfile;
+  }
+
+  const FpArgFreqMap &getFpArgsProfile() const {
+    return FpArgsProfile;
+  }
+
   /// Return the maximum of sample counts in a function body. When SkipCallSite
   /// is false, which is the default, the return count includes samples in the
   /// inlined functions. When SkipCallSite is true, the return count only
@@ -1099,6 +1126,30 @@ public:
         mergeSampleProfErrors(Result,
                               FSMap[Rec.first].merge(Rec.second, Weight));
     }
+
+    //Merge Argument Profiles
+    for (const auto &I : Other.getIntArgsProfile()) { // callsites
+      const LineLocation &Loc = I.first;
+      for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) { //which arg register
+        for (const auto &VC : I.second[Slot]) { //which value
+          mergeSampleProfErrors(Result,
+              addIntArgSample(Loc.LineOffset, Loc.Discriminator, Slot,
+                              VC.first, VC.second, Weight));
+        }
+      }
+    }
+
+    for (const auto &I : Other.getFpArgsProfile()) {
+      const LineLocation &Loc = I.first;
+      for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
+        for (const auto &VC : I.second[Slot]) {
+          mergeSampleProfErrors(Result,
+              addFpArgSample(Loc.LineOffset, Loc.Discriminator, Slot,
+                            VC.first, VC.second, Weight));
+        }
+      }
+    }
+    
     return Result;
   }
 
@@ -1293,6 +1344,8 @@ public:
            TotalHeadSamples == Other.TotalHeadSamples &&
            BodySamples == Other.BodySamples &&
            CallsiteSamples == Other.CallsiteSamples;
+           IntArgsProfile == Other.IntArgsProfile;
+           FpArgsProfile == Other.FpArgsProfile;
   }
 
   bool operator!=(const FunctionSamples &Other) const {
@@ -1361,8 +1414,27 @@ private:
   /// be remapped to 1 and find the location of bar in the profile.
   const LocToLocMap *IRToProfileLocationMap = nullptr;
 
-  /// TODO Add description 
+  /// Map call site locations to per-argument-slot values for integer arguments (RDI, RSI, RDX, RCX, R8, R9).
+  ///
+  /// Each entry maps a call site (identified by LineLocation) to an array of
+  /// MaxIntArgs = 6 frequency maps, one per argument register slot. Each
+  /// frequency map records how often a given runtime value was observed in
+  /// that slot at that call site. For example, given:
+  ///
+  ///     void foo() {
+  ///  1    compute_scale(value, /*divisor=*/1);
+  ///     }
+  ///
+  /// if divisor was observed as 1 on every sampled invocation, the entry for
+  /// this call site's slot 1 (RSI) would map value 1 -> N samples. Slots
+  /// beyond the callee's actual arity contain garbage values, 
+  /// this problem is deferred to consuming passes by design.
   IntArgFreqMap IntArgsProfile;
+
+  /// Map call site locations to per-argument-slot values for floating-point arguments (XMM0-XMM7).
+  ///
+  /// Same shape as IntArgsProfile, but keyed by FpValue (the raw Lo/Hi bit
+  /// pattern of the XMM register) and sized to MaxFpArgs = 8 slots.
   FpArgFreqMap FpArgsProfile;
 };
 
@@ -1625,7 +1697,7 @@ private:
 
 using namespace sampleprof;
 // Provide DenseMapInfo for SampleContext.
-template <> struct DenseMapInfo<SampleContext> {
+template <> struct DenseMapInfo<SampleContext, void> {
   static inline SampleContext getEmptyKey() { return SampleContext(); }
 
   static inline SampleContext getTombstoneKey() {
@@ -1641,18 +1713,6 @@ template <> struct DenseMapInfo<SampleContext> {
   }
 };
 
-// Provide DenseMapInfo for FunctionSamples::FpValue  
-
-template <> struct DenseMapInfo<sampleprof::FpValue> {
-  static inline sampleprof::FpValue getEmptyKey() { return {~0ULL, ~0ULL}; }
-  static inline sampleprof::FpValue getTombstoneKey() { return {~0ULL - 1, ~0ULL - 1}; }
-  static unsigned getHashValue(const sampleprof::FpValue &V) {
-    return (unsigned)hash_combine(V.Lo, V.Hi);
-  }
-  static bool isEqual(const sampleprof::FpValue &LHS, const sampleprof::FpValue &RHS) {
-    return LHS == RHS;
-  }
-};
 
 
 
