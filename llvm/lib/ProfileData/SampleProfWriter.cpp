@@ -606,6 +606,44 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
   }
   Indent -= 1;
 
+  if (!S.getIntArgsProfile().empty()) {
+    for (const auto &[Loc, IntArgArr] : S.getIntArgsProfile()) {
+      OS.indent(Indent + 1);
+      OS << "!IntArgs: ";
+      Loc.print(OS);
+      for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
+        const auto &IntFreqMap = IntArgArr[Slot];
+        if (IntFreqMap.empty())
+          continue;
+        OS << " arg" << Slot << "[";
+        for (const auto &[Value, Count] : IntFreqMap)
+          OS << Value << ":" << Count << " ";
+        OS << "]";
+      }
+      OS << "\n";
+      LineCount++;
+    }
+  }
+
+  if (!S.getFpArgsProfile().empty()) {
+    for (const auto &[Loc, FpArgArr] : S.getFpArgsProfile()) {
+      OS.indent(Indent + 1);
+      OS << "!FpArgs: ";
+      Loc.print(OS);
+      for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
+        const auto &FpFreqMap = FpArgArr[Slot];
+        if (FpFreqMap.empty())
+          continue;
+        OS << " arg" << Slot << "[";
+        for (const auto &[Value, Count] : FpFreqMap)
+          OS << Value << ":" << Count << " ";
+        OS << "]";
+      }
+      OS << "\n";
+      LineCount++;
+    }
+  }
+
   if (FunctionSamples::ProfileIsProbeBased) {
     OS.indent(Indent + 1);
     OS << "!CFGChecksum: " << S.getFunctionHash() << "\n";
@@ -845,6 +883,32 @@ std::error_code SampleProfileWriterBinary::writeBody(const FunctionSamples &S) {
       if (std::error_code EC = writeBody(FunctionSample))
         return EC;
     }
+    
+    // Emit the Integer Argument profile
+    encodeULEB128(S.getIntArgsProfile().size(), OS); //no. of line locations
+    for (const auto &[LineLocation, IntArgArr] : S.getIntArgsProfile()){
+      LineLocation.serialize(OS);
+      for (const auto &IntFreqMap : IntArgArr){
+        encodeULEB128(IntFreqMap.size()); //no. of value:count pairs
+        for (const auto &[Value, Count] : IntFreqMap){
+          encodeULEB128(Value, OS);
+          encodeULEB128(Count, OS);
+        }
+      }
+    }
+
+    encodeULEB128(S.getFpArgsProfile().size(), OS); //no. of line locations
+    for (const auto &[LineLocation, FpArgArr] : S.getFpArgsProfile()){
+      LineLocation.serialize(OS);
+      for (const auto &FpFreqMap : FpArgArr){
+        encodeULEB128(FpFreqMap.size()); //no. of value:count pairs
+        for (const auto &[Value, Count] : FpFreqMap){
+          encodeULEB128(Value, OS);
+          encodeULEB128(Count, OS);
+        }
+      }
+    }
+
 
   return sampleprof_error::success;
 }
