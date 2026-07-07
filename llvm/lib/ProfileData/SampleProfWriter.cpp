@@ -636,7 +636,7 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
           continue;
         OS << " arg" << Slot << "[";
         for (const auto &[Value, Count] : FpFreqMap)
-          OS << Value << ":" << Count << " ";
+          OS << Value.first << "," << Value.second << ":" << Count << " ";
         OS << "]";
       }
       OS << "\n";
@@ -888,8 +888,8 @@ std::error_code SampleProfileWriterBinary::writeBody(const FunctionSamples &S) {
     encodeULEB128(S.getIntArgsProfile().size(), OS); //no. of line locations
     for (const auto &[LineLocation, IntArgArr] : S.getIntArgsProfile()){
       LineLocation.serialize(OS);
-      for (const auto &IntFreqMap : IntArgArr){
-        encodeULEB128(IntFreqMap.size()); //no. of value:count pairs
+      for (const auto &IntMap : IntArgArr){
+        encodeULEB128(IntMap.size()); //no. of value:count pairs
         for (const auto &[Value, Count] : IntFreqMap){
           encodeULEB128(Value, OS);
           encodeULEB128(Count, OS);
@@ -900,8 +900,8 @@ std::error_code SampleProfileWriterBinary::writeBody(const FunctionSamples &S) {
     encodeULEB128(S.getFpArgsProfile().size(), OS); //no. of line locations
     for (const auto &[LineLocation, FpArgArr] : S.getFpArgsProfile()){
       LineLocation.serialize(OS);
-      for (const auto &FpFreqMap : FpArgArr){
-        encodeULEB128(FpFreqMap.size()); //no. of value:count pairs
+      for (const auto &FpqMap : FpArgArr){
+        encodeULEB128(FpMap.size()); //no. of value:count pairs
         for (const auto &[Value, Count] : FpFreqMap){
           encodeULEB128(Value, OS);
           encodeULEB128(Count, OS);
