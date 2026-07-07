@@ -609,13 +609,12 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
   if (!S.getIntArgsProfile().empty()) {
     for (const auto &[Loc, IntArgArr] : S.getIntArgsProfile()) {
       OS.indent(Indent + 1);
-      OS << "!IntArgs: ";
       Loc.print(OS);
+      OS << ": ";
+      OS << "@IntArgs";
       for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
         const auto &IntFreqMap = IntArgArr[Slot];
-        if (IntFreqMap.empty())
-          continue;
-        OS << " arg" << Slot << "[";
+        OS << "[";
         for (const auto &[Value, Count] : IntFreqMap)
           OS << Value << ":" << Count << " ";
         OS << "]";
@@ -628,13 +627,12 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
   if (!S.getFpArgsProfile().empty()) {
     for (const auto &[Loc, FpArgArr] : S.getFpArgsProfile()) {
       OS.indent(Indent + 1);
-      OS << "!FpArgs: ";
       Loc.print(OS);
+      OS << ": ";
+      OS << "@FpArgs";
       for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
         const auto &FpFreqMap = FpArgArr[Slot];
-        if (FpFreqMap.empty())
-          continue;
-        OS << " arg" << Slot << "[";
+        OS << "[";
         for (const auto &[Value, Count] : FpFreqMap)
           OS << Value.first << "," << Value.second << ":" << Count << " ";
         OS << "]";
