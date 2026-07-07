@@ -634,7 +634,7 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
         const auto &FpFreqMap = FpArgArr[Slot];
         OS << "[";
         for (const auto &[Value, Count] : FpFreqMap)
-          OS << Value.first << "," << Value.second << ":" << Count << " ";
+          OS << Value.Lo << "," << Value.Hi << ":" << Count << " ";
         OS << "]";
       }
       OS << "\n";

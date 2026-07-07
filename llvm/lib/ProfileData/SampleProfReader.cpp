@@ -38,6 +38,7 @@
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -197,6 +198,8 @@ enum class LineType {
   CallSiteProfile,
   BodyProfile,
   Metadata,
+  IntArgProfile,
+  FpArgProfile,
 };
 
 /// Parse \p Input as line sample.
@@ -216,7 +219,8 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
                       uint32_t &Discriminator, StringRef &CalleeName,
                       DenseMap<StringRef, uint64_t> &TargetCountMap,
                       uint64_t &FunctionHash, uint32_t &Attributes,
-                      bool &IsFlat) {
+                      bool &IsFlat, std::array<IntFreqMap, MaxIntArgs> &IntArgSamples,
+                      std::array<FpFreqMap, MaxFpArgs> &FpArgSamples) {
   for (Depth = 0; Input[Depth] == ' '; Depth++)
     ;
   if (Depth == 0)
@@ -306,6 +310,66 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
       // Change n3 to the next blank space after colon + integer pair.
       n3 = n4;
     }
+  } else if (Rest.starts_with("@IntArgs")) { //example -> Rest = @IntArgs [3:4 21:20 ][42:100 ]
+    LineTy = LineType::IntArgProfile;
+    StringRef Body = Rest.substr(strlen("@IntArgs")).trim(); // example -> Rest = [3:4 21:20 ][42:100 ]
+    
+    for(unsigned Slot = 0; Slot < MaxIntArgs; ++Slot){ 
+
+      if(!Body.starts_with("[")){
+        return false;
+      }
+
+      Body = Body.substr(1); //remove "[" 
+
+      while(!Body.starts_with("]")){ //parse all value count pairs
+        auto [ValueCountPair, NewBody] = Body.split(" "); // example-> ValueCountPair = 3:4 Body =  21:20 ][42:100 ] 
+        Body = NewBody;
+        auto [ValueStr, CountStr] = ValueCountPair.split(":");
+        uint64_t Value, Count;
+        if (ValueStr.getAsInteger(10, Value) || CountStr.getAsInteger(10, Count))
+          return false;
+        IntArgSamples[Slot][Value] = Count;
+      }
+
+      Body = Body.substr(1); //remove "]"
+
+    }
+
+    if (!Body.empty())
+        return false;
+    
+
+  } else if (Rest.starts_with("@FpArgs")) {
+    LineTy = LineType::FpArgProfile;
+    StringRef Body = Rest.substr(strlen("@FpArgs")).trim(); // example -> Rest = [0,0:10 3221225472,0:5 ][1073741824,0:50 ]
+
+    
+    for(unsigned Slot = 0; Slot < MaxFpArgs; ++Slot){ 
+
+      if(!Body.starts_with("[")){
+        return false;
+      }
+
+      Body = Body.substr(1); //remove "[" 
+
+      while(!Body.starts_with("]")){ //parse all value count pairs
+        auto [ValueCountPair, NewBody] = Body.split(" "); // example-> ValueCountPair = 0,0:10 Body = 3221225472,0:5 ][1073741824,0:50 ] 
+        Body = NewBody;
+        auto [FpValueStr, CountStr] = ValueCountPair.split(":");
+        auto [LoStr, HiStr] = FpValueStr.split(",");
+        uint64_t Lo, Hi, Count;
+        if (LoStr.getAsInteger(10, Lo) || HiStr.getAsInteger(10, Hi) || CountStr.getAsInteger(10, Count))
+          return false;
+        FpArgSamples[Slot][FpValue{Lo, Hi}] = Count;
+      }
+
+      Body = Body.substr(1); //remove "]"
+    }
+
+    if (!Body.empty())
+    return false;
+
   } else {
     LineTy = LineType::CallSiteProfile;
     size_t n3 = Rest.find_last_of(':');
@@ -374,6 +438,8 @@ std::error_code SampleProfileReaderText::readImpl() {
       uint64_t NumSamples;
       StringRef FName;
       DenseMap<StringRef, uint64_t> TargetCountMap;
+      std::array<IntFreqMap, MaxIntArgs> IntArgSamples;
+      std::array<FpFreqMap, MaxFpArgs> FpArgSamples;
       uint32_t Depth, LineOffset, Discriminator;
       LineType LineTy;
       uint64_t FunctionHash = 0;
@@ -381,7 +447,7 @@ std::error_code SampleProfileReaderText::readImpl() {
       bool IsFlat = false;
       if (!ParseLine(*LineIt, LineTy, Depth, NumSamples, LineOffset,
                      Discriminator, FName, TargetCountMap, FunctionHash,
-                     Attributes, IsFlat)) {
+                     Attributes, IsFlat, IntArgSamples, FpArgSamples)) {
         reportError(LineIt.line_number(),
                     "Expected 'NUM[.NUM]: NUM[ mangled_name:NUM]*', found " +
                         *LineIt);
@@ -421,6 +487,30 @@ std::error_code SampleProfileReaderText::readImpl() {
         mergeSampleProfErrors(
             Result,
             FProfile.addBodySamples(LineOffset, Discriminator, NumSamples));
+        break;
+      }
+      case LineType::IntArgProfile: {
+        FunctionSamples &FProfile = *InlineStack.back();
+        for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
+          for (const auto &[Value, Count] : IntArgSamples[Slot]) {
+            mergeSampleProfErrors(Result,
+                                  FProfile.addIntArgSample(
+                                      LineOffset, Discriminator, Slot, Value,
+                                      Count));
+          }
+        }
+        break;
+      }
+      case LineType::FpArgProfile: {
+        FunctionSamples &FProfile = *InlineStack.back();
+        for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
+          for (const auto &[Value, Count] : FpArgSamples[Slot]) {
+            mergeSampleProfErrors(Result,
+                                  FProfile.addFpArgSample(
+                                      LineOffset, Discriminator, Slot, Value,
+                                      Count));
+          }
+        }
         break;
       }
       case LineType::Metadata: {
