@@ -613,11 +613,8 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
       OS << ": ";
       OS << "@IntArgs";
       for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
-        const auto &IntFreqMap = IntArgArr[Slot];
-        OS << "[";
-        for (const auto &[Value, Count] : IntFreqMap)
-          OS << Value << ":" << Count << " ";
-        OS << "]";
+        const auto &IntArgMode = IntArgArr[Slot];
+          OS << IntArgMode.Value << ":" << IntArgMode.Percentage << " ";
       }
       OS << "\n";
       LineCount++;
@@ -631,11 +628,8 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
       OS << ": ";
       OS << "@FpArgs";
       for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
-        const auto &FpFreqMap = FpArgArr[Slot];
-        OS << "[";
-        for (const auto &[Value, Count] : FpFreqMap)
-          OS << Value.Lo << "," << Value.Hi << ":" << Count << " ";
-        OS << "]";
+        const auto &FpArgMode = FpArgArr[Slot];
+        OS << FpArgMode.Value.Lo << "," << FpArgMode.Value.Hi << ":" << FpArgMode.Percentage << " ";
       }
       OS << "\n";
       LineCount++;
@@ -882,30 +876,26 @@ std::error_code SampleProfileWriterBinary::writeBody(const FunctionSamples &S) {
         return EC;
     }
     
-    // Emit the Integer Argument profile
-    encodeULEB128(S.getIntArgsProfile().size(), OS); //no. of line locations
-    for (const auto &[LineLocation, IntArgArr] : S.getIntArgsProfile()){
-      LineLocation.serialize(OS);
-      for (const auto &IntMap : IntArgArr){
-        encodeULEB128(IntMap.size()); //no. of value:count pairs
-        for (const auto &[Value, Count] : IntFreqMap){
-          encodeULEB128(Value, OS);
-          encodeULEB128(Count, OS);
-        }
-      }
+  // Emit the integer argument profile.
+  encodeULEB128(S.getIntArgsProfile().size(), OS);
+  for (const auto &[Loc, IntArgArr] : S.getIntArgsProfile()) {
+    Loc.serialize(OS);
+    for (const auto &IntMode : IntArgArr) {
+      encodeULEB128(IntMode.Value, OS);
+      encodeULEB128(IntMode.Percentage, OS);
     }
+  }
 
-    encodeULEB128(S.getFpArgsProfile().size(), OS); //no. of line locations
-    for (const auto &[LineLocation, FpArgArr] : S.getFpArgsProfile()){
-      LineLocation.serialize(OS);
-      for (const auto &FpqMap : FpArgArr){
-        encodeULEB128(FpMap.size()); //no. of value:count pairs
-        for (const auto &[Value, Count] : FpFreqMap){
-          encodeULEB128(Value, OS);
-          encodeULEB128(Count, OS);
-        }
-      }
+  // Emit the floating-point argument profile.
+  encodeULEB128(S.getFpArgsProfile().size(), OS);
+  for (const auto &[Loc, FpArgArr] : S.getFpArgsProfile()) {
+    Loc.serialize(OS);
+    for (const auto &FpMode : FpArgArr) {
+      encodeULEB128(FpMode.Value.Lo, OS);
+      encodeULEB128(FpMode.Value.Hi, OS);
+      encodeULEB128(FpMode.Percentage, OS);
     }
+  }
 
 
   return sampleprof_error::success;

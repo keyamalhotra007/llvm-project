@@ -786,11 +786,27 @@ template <> struct DenseMapInfo<sampleprof::FpValue, void> {
 
 namespace sampleprof {
 
-using IntFreqMap = DenseMap<uint64_t, uint64_t>;
-using FpFreqMap = DenseMap<FpValue, uint64_t>;
+struct IntArgMode {
+  uint64_t Value = 0;
+  uint8_t Percentage = 0;   // rounded 0-100
 
-using IntArgFreqMap = std::map<LineLocation, std::array<IntFreqMap, MaxIntArgs>>;
-using FpArgFreqMap = std::map<LineLocation, std::array<FpFreqMap, MaxFpArgs>>;
+  bool operator==(const IntArgMode &Other) const {
+    return Value == Other.Value && Percentage == Other.Percentage;
+  }
+};
+
+struct FpArgMode {
+  FpValue Value{};
+  uint8_t Percentage = 0;
+
+  bool operator==(const FpArgMode &Other) const {
+    return Value == Other.Value && Percentage == Other.Percentage;
+  }
+};
+
+using IntArgFreqMap = std::map<LineLocation, std::array<IntArgMode, MaxIntArgs>>;
+using FpArgFreqMap = std::map<LineLocation, std::array<FpArgMode, MaxFpArgs>>;
+
 /// Representation of the samples collected for a function.
 ///
 /// This data structure contains all the collected samples for the body
@@ -851,40 +867,28 @@ public:
     return BodySamples[Location].merge(SampleRecord, Weight);
   }  
 
+
   sampleprof_error addIntArgSample(uint32_t LineOffset, uint32_t Discriminator,
-                                    uint32_t ArgIndex, uint64_t Value,
-                                    uint64_t Count, uint64_t Weight = 1) {
-    assert(ArgIndex < MaxIntArgs && "ArgIndex out of range");
-    bool Overflowed;
-    uint64_t &CurrentCount =
-        IntArgsProfile[LineLocation(LineOffset, Discriminator)][ArgIndex][Value];
+                    uint32_t ArgIndex, uint64_t Value, uint8_t Percentage) {
+  assert(ArgIndex < MaxIntArgs && "ArgIndex out of range");
+  assert(Percentage <= 100 && "Percentage out of range");
 
-    CurrentCount =
-        SaturatingMultiplyAdd(Count, Weight, CurrentCount, &Overflowed);
+  IntArgsProfile[LineLocation(LineOffset, Discriminator)][ArgIndex] =
+      IntArgMode{Value, Percentage};
 
-    
-
-    return Overflowed ? sampleprof_error::counter_overflow
-                       : sampleprof_error::success;
-  }
+  return sampleprof_error::success;
+}
 
   sampleprof_error addFpArgSample(uint32_t LineOffset, uint32_t Discriminator,
-                                   uint32_t ArgIndex, FpValue Value,
-                                   uint64_t Count, uint64_t Weight = 1) {
-    assert(ArgIndex < MaxFpArgs && "ArgIndex out of range");
-    bool Overflowed;
+                   uint32_t ArgIndex, FpValue Value, uint8_t Percentage) {
+  assert(ArgIndex < MaxFpArgs && "ArgIndex out of range");
+  assert(Percentage <= 100 && "Percentage out of range");
 
-    LineLocation Loc(LineOffset, Discriminator);
+  FpArgsProfile[LineLocation(LineOffset, Discriminator)][ArgIndex] =
+      FpArgMode{Value, Percentage};
 
-    uint64_t &CurrentCount =
-        FpArgsProfile[Loc][ArgIndex][Value];
-    
-    CurrentCount =
-        SaturatingMultiplyAdd(Count, Weight, CurrentCount, &Overflowed);
-    
-    return Overflowed ? sampleprof_error::counter_overflow
-                       : sampleprof_error::success;
-  }
+  return sampleprof_error::success;
+}
 
   // Remove a call target and decrease the body sample correspondingly. Return
   // the number of body samples actually decreased.
@@ -1131,28 +1135,8 @@ public:
                               FSMap[Rec.first].merge(Rec.second, Weight));
     }
 
-    //Merge Argument Profiles
-    for (const auto &I : Other.getIntArgsProfile()) { // callsites
-      const LineLocation &Loc = I.first;
-      for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) { //which arg register
-        for (const auto &VC : I.second[Slot]) { //which value
-          mergeSampleProfErrors(Result,
-              addIntArgSample(Loc.LineOffset, Loc.Discriminator, Slot,
-                              VC.first, VC.second, Weight));
-        }
-      }
-    }
-
-    for (const auto &I : Other.getFpArgsProfile()) {
-      const LineLocation &Loc = I.first;
-      for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
-        for (const auto &VC : I.second[Slot]) {
-          mergeSampleProfErrors(Result,
-              addFpArgSample(Loc.LineOffset, Loc.Discriminator, Slot,
-                            VC.first, VC.second, Weight));
-        }
-      }
-    }
+    //TODO: Merge Argument Profiles
+    
     
     return Result;
   }
@@ -1347,8 +1331,8 @@ public:
            TotalSamples == Other.TotalSamples &&
            TotalHeadSamples == Other.TotalHeadSamples &&
            BodySamples == Other.BodySamples &&
-           CallsiteSamples == Other.CallsiteSamples;
-           IntArgsProfile == Other.IntArgsProfile;
+           CallsiteSamples == Other.CallsiteSamples &&
+           IntArgsProfile == Other.IntArgsProfile &&
            FpArgsProfile == Other.FpArgsProfile;
   }
 

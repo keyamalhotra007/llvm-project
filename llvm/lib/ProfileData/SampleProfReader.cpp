@@ -219,8 +219,8 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
                       uint32_t &Discriminator, StringRef &CalleeName,
                       DenseMap<StringRef, uint64_t> &TargetCountMap,
                       uint64_t &FunctionHash, uint32_t &Attributes,
-                      bool &IsFlat, std::array<IntFreqMap, MaxIntArgs> &IntArgSamples,
-                      std::array<FpFreqMap, MaxFpArgs> &FpArgSamples) {
+                      bool &IsFlat, std::array<IntArgMode, MaxIntArgs> &IntArgSamples,
+                      std::array<FpArgMode, MaxFpArgs> &FpArgSamples) {
   for (Depth = 0; Input[Depth] == ' '; Depth++)
     ;
   if (Depth == 0)
@@ -310,29 +310,19 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
       // Change n3 to the next blank space after colon + integer pair.
       n3 = n4;
     }
-  } else if (Rest.starts_with("@IntArgs")) { //example -> Rest = @IntArgs [3:4 21:20 ][42:100 ]
+  } else if (Rest.starts_with("@IntArgs")) { //example -> Rest = @IntArgs 3:4 21:20 42:100 
     LineTy = LineType::IntArgProfile;
-    StringRef Body = Rest.substr(strlen("@IntArgs")).trim(); // example -> Rest = [3:4 21:20 ][42:100 ]
+    StringRef Body = Rest.substr(strlen("@IntArgs")).trim();
     
     for(unsigned Slot = 0; Slot < MaxIntArgs; ++Slot){ 
 
-      if(!Body.starts_with("[")){
+      auto [ValuePercentagePair, NewBody] = Body.split(" "); 
+      Body = NewBody;
+      auto [ValueStr, PercentageStr] = ValuePercentagePair.split(":");
+      uint64_t Value, Percentage;
+      if (ValueStr.getAsInteger(10, Value) || PercentageStr.getAsInteger(10, Percentage))
         return false;
-      }
-
-      Body = Body.substr(1); //remove "[" 
-
-      while(!Body.starts_with("]")){ //parse all value count pairs
-        auto [ValueCountPair, NewBody] = Body.split(" "); // example-> ValueCountPair = 3:4 Body =  21:20 ][42:100 ] 
-        Body = NewBody;
-        auto [ValueStr, CountStr] = ValueCountPair.split(":");
-        uint64_t Value, Count;
-        if (ValueStr.getAsInteger(10, Value) || CountStr.getAsInteger(10, Count))
-          return false;
-        IntArgSamples[Slot][Value] = Count;
-      }
-
-      Body = Body.substr(1); //remove "]"
+      IntArgSamples[Slot] = {Value, Percentage};
 
     }
 
@@ -342,30 +332,20 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
 
   } else if (Rest.starts_with("@FpArgs")) {
     LineTy = LineType::FpArgProfile;
-    StringRef Body = Rest.substr(strlen("@FpArgs")).trim(); // example -> Rest = [0,0:10 3221225472,0:5 ][1073741824,0:50 ]
+    StringRef Body = Rest.substr(strlen("@FpArgs")).trim(); // example -> Rest = 0,0:10 3221225472,0:5 1073741824,0:50 
 
-    
     for(unsigned Slot = 0; Slot < MaxFpArgs; ++Slot){ 
 
-      if(!Body.starts_with("[")){
+      auto [ValuePercentagePair, NewBody] = Body.split(" ");
+      Body = NewBody;
+      auto [FpValueStr, PercentageStr] = ValuePercentagePair.split(":");
+      auto [LoStr, HiStr] = FpValueStr.split(",");
+      uint64_t Lo, Hi, Percentage;
+      if (LoStr.getAsInteger(10, Lo) || HiStr.getAsInteger(10, Hi) || PercentageStr.getAsInteger(10, Percentage))
         return false;
-      }
-
-      Body = Body.substr(1); //remove "[" 
-
-      while(!Body.starts_with("]")){ //parse all value count pairs
-        auto [ValueCountPair, NewBody] = Body.split(" "); // example-> ValueCountPair = 0,0:10 Body = 3221225472,0:5 ][1073741824,0:50 ] 
-        Body = NewBody;
-        auto [FpValueStr, CountStr] = ValueCountPair.split(":");
-        auto [LoStr, HiStr] = FpValueStr.split(",");
-        uint64_t Lo, Hi, Count;
-        if (LoStr.getAsInteger(10, Lo) || HiStr.getAsInteger(10, Hi) || CountStr.getAsInteger(10, Count))
-          return false;
-        FpArgSamples[Slot][FpValue{Lo, Hi}] = Count;
-      }
-
-      Body = Body.substr(1); //remove "]"
-    }
+      FpArgSamples[Slot] = {FpValue{Lo, Hi}, Percentage};
+    
+  }
 
     if (!Body.empty())
     return false;
@@ -438,8 +418,8 @@ std::error_code SampleProfileReaderText::readImpl() {
       uint64_t NumSamples;
       StringRef FName;
       DenseMap<StringRef, uint64_t> TargetCountMap;
-      std::array<IntFreqMap, MaxIntArgs> IntArgSamples;
-      std::array<FpFreqMap, MaxFpArgs> FpArgSamples;
+      std::array<IntArgMode, MaxIntArgs> IntArgSamples;
+      std::array<FpArgMode, MaxFpArgs> FpArgSamples;
       uint32_t Depth, LineOffset, Discriminator;
       LineType LineTy;
       uint64_t FunctionHash = 0;
@@ -492,24 +472,22 @@ std::error_code SampleProfileReaderText::readImpl() {
       case LineType::IntArgProfile: {
         FunctionSamples &FProfile = *InlineStack.back();
         for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
-          for (const auto &[Value, Count] : IntArgSamples[Slot]) {
-            mergeSampleProfErrors(Result,
-                                  FProfile.addIntArgSample(
-                                      LineOffset, Discriminator, Slot, Value,
-                                      Count));
-          }
+          const IntArgMode &ArgMode = IntArgSamples[Slot];
+          mergeSampleProfErrors(Result,
+                                FProfile.addIntArgSample(
+                                    LineOffset, Discriminator, Slot,
+                                    ArgMode.Value, ArgMode.Percentage));
         }
         break;
       }
       case LineType::FpArgProfile: {
         FunctionSamples &FProfile = *InlineStack.back();
         for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
-          for (const auto &[Value, Count] : FpArgSamples[Slot]) {
-            mergeSampleProfErrors(Result,
-                                  FProfile.addFpArgSample(
-                                      LineOffset, Discriminator, Slot, Value,
-                                      Count));
-          }
+          const FpArgMode &ArgMode = FpArgSamples[Slot];
+          mergeSampleProfErrors(Result,
+                                FProfile.addFpArgSample(
+                                    LineOffset, Discriminator, Slot,
+                                    ArgMode.Value, ArgMode.Percentage));
         }
         break;
       }

@@ -203,15 +203,12 @@ void FunctionSamples::print(raw_ostream &OS, unsigned Indent) const {
   OS.indent(Indent);
   if (!IntArgsProfile.empty()) {
     OS << "Integer Argument value samples {\n";
-    for (const auto &CS : IntArgsProfile) {
+    for (const auto &I : IntArgsProfile) {
       OS.indent(Indent + 2);
-      OS << CS.first << ": ";
+      OS << I.first << ": ";
       for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
-        if (CS.second[Slot].empty()) continue;
-        OS << "arg" << Slot << "[";
-        for (const auto &V : CS.second[Slot])
-          OS << V.first << ":" << V.second << " ";
-        OS << "] ";
+        const IntArgMode &M = I.second[Slot];
+        OS << "arg" << Slot << "[" << M.Value << ":" << (unsigned)M.Percentage << "%] ";
       }
       OS << "\n";
     }
@@ -222,14 +219,12 @@ void FunctionSamples::print(raw_ostream &OS, unsigned Indent) const {
   OS.indent(Indent);
   if (!FpArgsProfile.empty()) {
     OS << "Floating Point Argument value samples {\n";
-    for (const auto &CS : FpArgsProfile) {
+    for (const auto &I : FpArgsProfile) {
       OS.indent(Indent + 2);
-      OS << CS.first << ": ";
+      OS << I.first << ": ";
       for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
-        if (CS.second[Slot].empty()) continue;
-        OS << "arg" << Slot << "[";
-        for (const auto &V : CS.second[Slot])
-          OS << V.first << ":" << V.second << " ";
+          const FpArgMode &M = I.second[Slot];
+          OS << "arg" << Slot << "[" << M.Value.Lo << "," << M.Value.Hi << ":" << (unsigned)M.Percentage << "%] ";
         OS << "] ";
       }
       OS << "\n";
