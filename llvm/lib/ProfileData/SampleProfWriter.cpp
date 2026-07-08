@@ -611,10 +611,10 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
       OS.indent(Indent + 1);
       Loc.print(OS);
       OS << ": ";
-      OS << "@IntArgs";
+      OS << "@IntArgs ";
       for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
         const auto &IntArgMode = IntArgArr[Slot];
-          OS << IntArgMode.Value << ":" << IntArgMode.Percentage << " ";
+          OS << IntArgMode.Value << ":" << (unsigned)IntArgMode.Percentage << " ";
       }
       OS << "\n";
       LineCount++;
@@ -626,10 +626,10 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
       OS.indent(Indent + 1);
       Loc.print(OS);
       OS << ": ";
-      OS << "@FpArgs";
+      OS << "@FpArgs ";
       for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
         const auto &FpArgMode = FpArgArr[Slot];
-        OS << FpArgMode.Value.Lo << "," << FpArgMode.Value.Hi << ":" << FpArgMode.Percentage << " ";
+        OS << FpArgMode.Value.Lo << "," << FpArgMode.Value.Hi << ":" << (unsigned)FpArgMode.Percentage << " ";
       }
       OS << "\n";
       LineCount++;

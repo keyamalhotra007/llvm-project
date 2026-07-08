@@ -310,9 +310,9 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
       // Change n3 to the next blank space after colon + integer pair.
       n3 = n4;
     }
-  } else if (Rest.starts_with("@IntArgs")) { //example -> Rest = @IntArgs 3:4 21:20 42:100 
+  } else if (Rest.starts_with("@IntArgs ")) { //example -> Rest = @IntArgs 3:4 21:20 42:100 
     LineTy = LineType::IntArgProfile;
-    StringRef Body = Rest.substr(strlen("@IntArgs")).trim();
+    StringRef Body = Rest.substr(strlen("@IntArgs ")).trim();
     
     for(unsigned Slot = 0; Slot < MaxIntArgs; ++Slot){ 
 
@@ -330,9 +330,9 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
         return false;
     
 
-  } else if (Rest.starts_with("@FpArgs")) {
+  } else if (Rest.starts_with("@FpArgs ")) {
     LineTy = LineType::FpArgProfile;
-    StringRef Body = Rest.substr(strlen("@FpArgs")).trim(); // example -> Rest = 0,0:10 3221225472,0:5 1073741824,0:50 
+    StringRef Body = Rest.substr(strlen("@FpArgs ")).trim(); // example -> Rest = 0,0:10 3221225472,0:5 1073741824,0:50 
 
     for(unsigned Slot = 0; Slot < MaxFpArgs; ++Slot){ 
 
