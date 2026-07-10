@@ -453,9 +453,16 @@ struct CandidateComparer {
   }
 };
 
+struct CallSiteArgumentProfile {
+  const std::array<IntArgMode, 6> *IntArgs = nullptr;  
+  const std::array<FpArgMode, 8> *FpArgs = nullptr;    
+};
+
 using CandidateQueue =
     PriorityQueue<InlineCandidate, std::vector<InlineCandidate>,
                   CandidateComparer>;
+
+
 
 /// Sample profile pass.
 ///
@@ -528,6 +535,8 @@ protected:
   std::vector<Function *> buildFunctionOrder(Module &M, LazyCallGraph &CG);
   std::unique_ptr<ProfiledCallGraph> buildProfiledCallGraph(Module &M);
   void generateMDProfMetadata(Function &F);
+  void generateArgumentProfileMetadata(Function &F);
+  std::optional<CallSiteArgumentProfile> findCallsiteArgumentProfile(const Instruction &Inst) const;
   bool rejectHighStalenessProfile(Module &M, ProfileSummaryInfo *PSI,
                                   const SampleProfileMap &Profiles);
   void removePseudoProbeInstsDiscriminator(Module &M);
@@ -794,6 +803,68 @@ SampleProfileLoader::findFunctionSamples(const Instruction &Inst) const {
           DIL, Reader->getRemapper(), &FuncNameToProfNameMap);
   }
   return it.first->second;
+}
+
+
+std::optional<CallSiteArgumentProfile> 
+SampleProfileLoader::findCallsiteArgumentProfile(const Instruction &Inst) const {
+  const FunctionSamples *FS = findFunctionSamples(Inst);
+  if (!FS)
+    return std::nullopt;
+
+  const DILocation *DIL = Inst.getDebugLoc();
+  if (!DIL)
+    return std::nullopt;
+
+  LineLocation CallSite = FunctionSamples::getCallSiteIdentifier(DIL);
+  CallSite = FS->mapIRLocToProfileLoc(CallSite); // Callsite: {LineOffset, Discriminator}
+  const auto &IntArgsMap = FS->getIntArgsProfile();
+  const auto &FpArgsMap = FS->getFpArgsProfile();
+
+  auto IntIt = IntArgsMap.find(CallSite);
+  auto FpIt = FpArgsMap.find(CallSite);
+
+  if (IntIt == IntArgsMap.end() && FpIt == FpArgsMap.end())
+    return std::nullopt;
+
+  CallSiteArgumentProfile Profile;
+  Profile.IntArgs = IntIt != IntArgsMap.end() ? &IntIt->second : nullptr;
+  Profile.FpArgs = FpIt != FpArgsMap.end() ? &FpIt->second : nullptr;
+
+  return Profile;
+}
+
+static void attachArgumentProfileMetadata(Instruction &I,
+                                           const CallSiteArgumentProfile &P) {
+  LLVMContext &Ctx = I.getContext();
+
+  if (P.IntArgs) {
+    SmallVector<Metadata *, 1 + MaxIntArgs * 2> Ops;
+    Ops.push_back(MDString::get(Ctx, "int-args"));
+    for (unsigned Slot = 0; Slot < MaxIntArgs; ++Slot) {
+      const IntArgMode &M = (*P.IntArgs)[Slot];
+      Ops.push_back(ConstantAsMetadata::get(
+          ConstantInt::get(Type::getInt64Ty(Ctx), M.Value)));
+      Ops.push_back(ConstantAsMetadata::get(
+          ConstantInt::get(Type::getInt64Ty(Ctx), M.Percentage)));
+    }
+    I.setMetadata("int-args", MDNode::get(Ctx, Ops));
+  }
+
+  if (P.FpArgs) {
+    SmallVector<Metadata *, 1 + MaxFpArgs * 3> Ops;
+    Ops.push_back(MDString::get(Ctx, "fp-args"));
+    for (unsigned Slot = 0; Slot < MaxFpArgs; ++Slot) {
+      const FpArgMode &M = (*P.FpArgs)[Slot];
+      Ops.push_back(ConstantAsMetadata::get(
+          ConstantInt::get(Type::getInt64Ty(Ctx), M.Value.Lo)));
+      Ops.push_back(ConstantAsMetadata::get(
+          ConstantInt::get(Type::getInt64Ty(Ctx), M.Value.Hi)));
+      Ops.push_back(ConstantAsMetadata::get(
+          ConstantInt::get(Type::getInt64Ty(Ctx), M.Percentage)));
+    }
+    I.setMetadata("fp-args", MDNode::get(Ctx, Ops));
+  }
 }
 
 /// Check whether the indirect call promotion history of \p Inst allows
@@ -1745,6 +1816,8 @@ void SampleProfileLoader::generateMDProfMetadata(Function &F) {
       }
     }
 
+
+
     misexpect::checkExpectAnnotations(*TI, Weights, /*IsFrontend=*/false);
 
     uint64_t TempWeight;
@@ -1771,6 +1844,24 @@ void SampleProfileLoader::generateMDProfMetadata(Function &F) {
         LLVM_DEBUG(dbgs() << "CLEARED. All branch weights are zero.\n");
       } else {
         LLVM_DEBUG(dbgs() << "SKIPPED. All branch weights are zero.\n");
+      }
+    }
+  }
+}
+
+//WORKING HERE
+
+void SampleProfileLoader::generateArgumentProfileMetadata(Function &F) {
+  for (auto &BI : F) {
+    BasicBlock *BB = &BI;
+
+    if (BlockWeights[BB]) {
+      for (auto &I : *BB) {
+        if (isa<CallBase>(I)) {
+          if (auto ArgProfile = findCallsiteArgumentProfile(I)) {
+            attachArgumentProfileMetadata(I, *ArgProfile);
+          }
+        }
       }
     }
   }
@@ -1820,6 +1911,7 @@ bool SampleProfileLoader::emitAnnotations(Function &F) {
 
   if (Changed)
     generateMDProfMetadata(F);
+    generateArgumentProfileMetadata(F);
 
   emitCoverageRemarks(F);
   return Changed;
