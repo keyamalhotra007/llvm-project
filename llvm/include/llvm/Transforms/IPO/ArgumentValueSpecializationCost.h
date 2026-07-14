@@ -44,10 +44,9 @@ void chargeGrowth(Function &Callee, TargetTransformInfo &TTI,
 /// Score a candidate specialization: either a single hot argument, or a
 /// combination of several hot arguments at the same call site. Higher is
 /// better. Returns 0 if the hard size/growth gates are violated (i.e. this
-/// candidate must not be specialized at all), so 0 can be used directly as
-/// a "reject" sentinel when ranking or filtering candidates.
+/// candidate must not be specialized at all)
 unsigned computeSpecializationScore(Function &Callee,
-                                    ArrayRef<ArgCandidate> Args,
+                                    uint8_t Percentage,
                                     TargetTransformInfo &TTI,
                                     GrowthMap &Growth);
 

@@ -1,6 +1,7 @@
-#include "llvm/Transforms/Utils/ArgumentValueSpecialization.h"
+#include "llvm/Transforms/IPO/ArgumentValueSpecialization.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -12,9 +13,9 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h" // SplitBlockAndInsertIfThenElse
+#include "llvm/Transforms/IPO/ArgumentValueSpecializationCost.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h" 
 #include "llvm/Transforms/Utils/Cloning.h"
-
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -24,6 +25,7 @@ using namespace llvm;
 
 namespace {
 
+
 struct CloneKey {
   Function *Callee;
   unsigned ArgIndex;
@@ -31,26 +33,31 @@ struct CloneKey {
   std::optional<uint64_t> ValueHi;
 
   bool operator<(const CloneKey &Other) const {
-    return std::tie(Callee, ArgIndex, ValueLo, ValueHi) <
-           std::tie(Other.Callee, Other.ArgIndex, Other.ValueLo,
-                    Other.ValueHi);
-  }
+  return std::tie(Callee, ArgIndex, ValueLo, ValueHi) <
+         std::tie(Other.Callee, Other.ArgIndex, Other.ValueLo, Other.ValueHi);
+}
 };
 
-struct CallSiteObservation {
+struct SpecializationCandidate {
+  Function *Callee;
+  unsigned ArgIndex;
+  uint64_t ValueLo;
+  std::optional<uint64_t> ValueHi; //only for Fp, not int
   CallBase *CB;
   uint8_t Percentage;
 };
+
 
 } // end namespace
 
 PreservedAnalyses
 ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
-  std::map<CloneKey, SmallVector<CallSiteObservation, 4>> IntCandidates;
-  std::map<CloneKey, SmallVector<CallSiteObservation, 4>> FpCandidates;
+  std::vector<SpecializationCandidate> Candidates;
+
 
   bool Changed = false;
 
+  FunctionAnalysisManager &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
   for (Function &F : M) {
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
@@ -89,13 +96,11 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
             auto *PctConst = cast<ConstantInt>(PctMeta->getValue());
             uint8_t Percentage = (uint8_t)PctConst->getZExtValue();
 
-            CloneKey CK{Callee, ArgIndex, Value, std::nullopt};
-            IntCandidates[CK].push_back({CB, Percentage});
+            Candidates.push_back({Callee, ArgIndex, Value, std::nullopt, CB, Percentage});
             ++IntPos;
 
           } else if (ValueTy->isFloatingPointTy()) {
             if (!FpMD) continue;
-            
             
             auto *LoMeta = cast<ConstantAsMetadata>(FpMD->getOperand(FpPos * 3 + 1));
             auto *LoConst = cast<ConstantInt>(LoMeta->getValue());
@@ -109,8 +114,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
             auto *PctConst = cast<ConstantInt>(PctMeta->getValue());
             uint8_t Percentage = (uint8_t)PctConst->getZExtValue();
 
-            CloneKey CK{Callee, ArgIndex, Lo, Hi};
-            FpCandidates[CK].push_back({CB, Percentage});
+            Candidates.push_back({Callee, ArgIndex, Lo, Hi, CB, Percentage}); 
 
             ++FpPos;
           }
@@ -118,6 +122,33 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
       }
     }
   }
+  // TODO: Clone candidate with highest score
+  GrowthMap Growth;
+  std::map<CloneKey, Function *> ClonedFunctions; // dedup cache: reuse clone for same (Callee, ArgIndex, Value)
+
+  for (auto &Cand : Candidates) {
+    Function *Callee = Cand.Callee;
+    TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(*Callee);
+
+    unsigned Score = computeSpecializationScore(*Callee, Cand.Percentage, TTI, Growth);
+    if (Score == 0)
+      continue;
+
+    CloneKey Key{Cand.Callee, Cand.ArgIndex, Cand.ValueLo, Cand.ValueHi};
+
+    Function *Clone = nullptr;
+    if (auto It = ClonedFunctions.find(Key); It != ClonedFunctions.end()) {
+      Clone = It->second; // reuse existing clone for this key
+    } else {
+      // Clone = cloneAndSpecialize(Callee, Cand.ArgIndex, Cand.ValueLo, Cand.ValueHi);
+      ClonedFunctions[Key] = Clone;
+      chargeGrowth(*Callee, TTI, Growth); // charge only once, on first creation of this key
+    }
+
+    // insertGuard(Callee, Clone, Cand.CB, Cand.ArgIndex, Cand.ValueLo);
+    // Changed = true;
+  }
+
 
   if (!Changed)
     return PreservedAnalyses::all();
