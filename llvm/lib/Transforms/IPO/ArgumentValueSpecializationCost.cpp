@@ -54,31 +54,66 @@ bool llvm::isEligibleForSpecialization(Function &F) {
   return true;
 }
 
-bool llvm::shouldSpecialize(Function &Callee, uint8_t HotnessPercentage,
-                            TargetTransformInfo &TTI, GrowthMap &Growth) {
-  if (!isEligibleForSpecialization(Callee))
-    return false;
-
-  if (HotnessPercentage < ArgSpecHotnessThreshold)
-    return false;
-
-  unsigned FuncSize = estimateFunctionCodeSize(Callee, TTI);
-
-  // never specialize past this size, no matter how hot.
-  if (FuncSize == 0 || FuncSize > ArgSpecMaxAbsoluteSize)
-    return false;
-
-  // if the growth already charged to this callee,
-  // plus what this new clone would add, 
-  // exceeds N times the original function's size: reject.
-  unsigned PriorGrowth = Growth.lookup(&Callee);
-  if ((PriorGrowth + FuncSize) / FuncSize > ArgSpecMaxCodeSizeGrowth)
-    return false;
-
-  return true;
-}
 
 void llvm::chargeGrowth(Function &Callee, TargetTransformInfo &TTI,
                         GrowthMap &Growth) {
   Growth[&Callee] += estimateFunctionCodeSize(Callee, TTI);
+}
+
+// hotter combination on a smaller function with less prior growth gets higher score.
+unsigned llvm::computeSpecializationScore(Function &Callee,
+                                          ArrayRef<ArgCandidate> Args,
+                                          TargetTransformInfo &TTI,
+                                          GrowthMap &Growth) {
+  if (Args.empty())
+    return 0;
+ 
+  if (!isEligibleForSpecialization(Callee))
+    return 0;
+ 
+  unsigned FuncSize = estimateFunctionCodeSize(Callee, TTI);
+  if (FuncSize == 0 || FuncSize > ArgSpecMaxAbsoluteSize)
+    return 0;
+ 
+  unsigned PriorGrowth = Growth.lookup(&Callee);
+  if ((PriorGrowth + FuncSize) / FuncSize > ArgSpecMaxCodeSizeGrowth)
+    return 0;
+ 
+  // --- Combine hotness across every argument in this candidate ---
+  //
+  // Each argument's Percentage is treated as an independent probability that
+  // this call site presents that particular constant. For a multi-argument
+  // specialization, the guard we'd insert only fires when ALL of the hot
+  // values are present simultaneously, so we combine via product rather than
+  // average: P(all N co-occur) = product of P(each), under an independence
+  // assumption. This likely understates true combined hotness for correlated
+  // arguments, so it's a conservative (lower-bound) estimate, not a precise
+  // one.
+  //
+  // Any single argument below the hotness threshold disqualifies the whole
+  // combination -- one cold argument means the guard rarely fires no matter
+  // how hot the others are.
+  unsigned CombinedPercent = 100; // 100%
+  for (const ArgCandidate &A : Args) {
+    if (A.Percentage < 97)
+      return 0;
+    CombinedPercent = (CombinedPercent * A.Percentage) / 100;
+    if (CombinedPercent < 90)
+      return 0;
+  }
+ 
+  // --- Score: higher combined hotness and smaller (less-already-grown)
+  // callee both increase the score. ---
+  //
+  // Dividing by (FuncSize + PriorGrowth) rather than just FuncSize means a
+  // callee that has already had other specializations charged against it
+  // scores lower for further specialization - all else equal, prefer
+  // spending your growth budget on callees you haven't already spent it on.
+  uint64_t SizePenalty = FuncSize + PriorGrowth;
+  uint64_t Score = (CombinedPercent * 100) / SizePenalty;
+ 
+  // A candidate that passed every gate above must never score exactly 0 --
+  // 0 is reserved to mean "rejected." Integer division can legitimately
+  // truncate a small-but-real score down to 0, so floor it at 1.
+  return Score > 0 ? static_cast<unsigned>(Score) : 1;
 }
