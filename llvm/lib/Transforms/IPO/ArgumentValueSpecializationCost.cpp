@@ -91,8 +91,5 @@ unsigned llvm::computeSpecializationScore(Function &Callee,
   uint64_t SizePenalty = FuncSize + PriorGrowth;
   uint64_t Score = (Percentage * 100) / SizePenalty;
  
-  // A candidate that passed every gate above must never score exactly 0 --
-  // 0 is reserved to mean "rejected." Integer division can legitimately
-  // truncate a small-but-real score down to 0, so floor it at 1.
   return Score == 0 ? 1 : static_cast<unsigned>(Score);
 }

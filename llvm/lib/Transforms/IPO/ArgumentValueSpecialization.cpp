@@ -7,6 +7,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/InstrTypes.h" 
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -25,18 +26,6 @@ using namespace llvm;
 
 namespace {
 
-
-struct CloneKey {
-  Function *Callee;
-  unsigned ArgIndex;
-  uint64_t ValueLo;
-  std::optional<uint64_t> ValueHi;
-
-  bool operator<(const CloneKey &Other) const {
-  return std::tie(Callee, ArgIndex, ValueLo, ValueHi) <
-         std::tie(Other.Callee, Other.ArgIndex, Other.ValueLo, Other.ValueHi);
-}
-};
 
 struct SpecializationCandidate {
   Function *Callee;
@@ -121,37 +110,65 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         }
       }
     }
-  }
-  // TODO: Clone candidate with highest score
-  GrowthMap Growth;
-  std::map<CloneKey, Function *> ClonedFunctions; // dedup cache: reuse clone for same (Callee, ArgIndex, Value)
+  
+  GrowthMap Growth; //accumulates how much code size each function has grown due to specializations so far
+  std::map<CloneKey, Function *> ClonedFunctions; //dedup cache: different callsites, same clone key -> share clone
 
-  for (auto &Cand : Candidates) {
+  // Pass 1: score everything, track best ArgIndex per call site.
+  DenseMap<CallBase *, std::pair<unsigned, unsigned>> BestArgForCallSite; //map CB to the best {ArgIndex, Score} found so fare
+  SmallVector<unsigned, 0> Scores(Candidates.size()); //store score for every candidate by index
+
+  // for every CB which single argument index gives the maximum specialization benefit
+  for (unsigned I = 0, size = Candidates.size(); I != size; ++I) {
+    auto &Cand = Candidates[I];
     Function *Callee = Cand.Callee;
     TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(*Callee);
 
     unsigned Score = computeSpecializationScore(*Callee, Cand.Percentage, TTI, Growth);
+    Scores[I] = Score;
+    if (Score == 0) //reject
+      continue;
+
+    CallBase *CB = Cand.CB;
+    auto It = BestArgForCallSite.find(CB); //Have we already recorded a best arg?
+    if (It == BestArgForCallSite.end() || Score > It->second.second)
+      BestArgForCallSite[CB] = {Cand.ArgIndex, Score};
+  }
+
+  // clone/guard only for the winning ArgIndex of each call site.
+  for (unsigned I = 0, size = Candidates.size(); I != size; ++I) {
+    auto &Cand = Candidates[I];
+    unsigned Score = Scores[I];
     if (Score == 0)
       continue;
 
+    CallBase *CB = Cand.CB;
+    auto BestIt = BestArgForCallSite.find(CB);
+    if (BestIt == BestArgForCallSite.end() || BestIt->second.first != Cand.ArgIndex)
+      continue;
+
+    Function *Callee = Cand.Callee;
+    TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(*Callee); //needed for chargeGrowth
     CloneKey Key{Cand.Callee, Cand.ArgIndex, Cand.ValueLo, Cand.ValueHi};
 
     Function *Clone = nullptr;
-    if (auto It = ClonedFunctions.find(Key); It != ClonedFunctions.end()) {
-      Clone = It->second; // reuse existing clone for this key
+    if (auto CloneIt = ClonedFunctions.find(Key); CloneIt != ClonedFunctions.end()) {
+      Clone = CloneIt->second; //if some other call site already created a clone for this exact (Callee, ArgIndex, Value) combination, reuse it 
     } else {
-      // Clone = cloneAndSpecialize(Callee, Cand.ArgIndex, Cand.ValueLo, Cand.ValueHi);
+      // Clone = cloneAndSpecialize(Key);
       ClonedFunctions[Key] = Clone;
-      chargeGrowth(*Callee, TTI, Growth); // charge only once, on first creation of this key
+      chargeGrowth(*Callee, TTI, Growth);
+      Changed = true;
+      // insertGuard(CB, Clone, Key.ArgIndex, Key.ValueLo, Key.ValueHi);
     }
-
-    // insertGuard(Callee, Clone, Cand.CB, Cand.ArgIndex, Cand.ValueLo);
-    // Changed = true;
   }
-
 
   if (!Changed)
     return PreservedAnalyses::all();
-
   return PreservedAnalyses::none();
 }
+}
+
+//Function * cloneAndSpecialize(const CloneKey &Key) {
+  //TODO: implement 
+//}
