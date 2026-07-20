@@ -174,22 +174,19 @@ Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
   ValueToValueMapTy Mappings;
   Function *Clone = CloneFunction(Key.Callee, Mappings);
   Clone->setName(Key.Callee->getName() + ".argspec." +
-                 Twine(Key.ArgIndex) + "." + Twine(Key.ValueLo)); //Can remove ValueLo later after debugging done
+                 Twine(Key.ArgIndex) + "." + Twine(Key.ValueLo)); //TODO: Can remove ValueLo later after debugging done
 
 
   Argument *SpecArg = Clone->getArg(Key.ArgIndex);
   Type *ArgTy = SpecArg->getType();
   Constant *ReplacementConst;
 
-  if (ArgTy->isFloatingPointTy()) { //can also use Key.ValueHi.has_value() -> Only x86_fp80/fp128 actually need the high word; float/double live
+  if (ArgTy->isFloatingPointTy()) { 
     unsigned Bits = ArgTy->getPrimitiveSizeInBits();
     if (Bits <= 64) {
-      APInt Raw(64, Key.ValueLo);
+      unsigned Bits = ArgTy->getPrimitiveSizeInBits();
+      APInt Raw(128, {Key.ValueLo, *Key.ValueHi}); // Hi is 0 when unused for fp
       Raw = Raw.trunc(Bits);
-      ReplacementConst =
-          ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
-    } else {
-      APInt Raw(Bits, {Key.ValueLo, *Key.ValueHi});
       ReplacementConst =
           ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
     }
