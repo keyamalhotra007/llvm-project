@@ -110,7 +110,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         }
       }
     }
-  
+  }
   GrowthMap Growth; //accumulates how much code size each function has grown due to specializations so far
   std::map<CloneKey, Function *> ClonedFunctions; //dedup cache: different callsites, same clone key -> share clone
 
@@ -155,7 +155,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
     if (auto CloneIt = ClonedFunctions.find(Key); CloneIt != ClonedFunctions.end()) {
       Clone = CloneIt->second; //if some other call site already created a clone for this exact (Callee, ArgIndex, Value) combination, reuse it 
     } else {
-      // Clone = cloneAndSpecialize(Key);
+      Clone = cloneAndSpecialize(Key);
       ClonedFunctions[Key] = Clone;
       chargeGrowth(*Callee, TTI, Growth);
       Changed = true;
@@ -166,9 +166,41 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
   if (!Changed)
     return PreservedAnalyses::all();
   return PreservedAnalyses::none();
-}
+
 }
 
-//Function * cloneAndSpecialize(const CloneKey &Key) {
-  //TODO: implement 
+
+Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
+  ValueToValueMapTy Mappings;
+  Function *Clone = CloneFunction(Key.Callee, Mappings);
+  Clone->setName(Key.Callee->getName() + ".argspec." +
+                 Twine(Key.ArgIndex) + "." + Twine(Key.ValueLo)); //Can remove ValueLo later after debugging done
+
+
+  Argument *SpecArg = Clone->getArg(Key.ArgIndex);
+  Type *ArgTy = SpecArg->getType();
+  Constant *ReplacementConst;
+
+  if (ArgTy->isFloatingPointTy()) { //can also use Key.ValueHi.has_value() -> Only x86_fp80/fp128 actually need the high word; float/double live
+    unsigned Bits = ArgTy->getPrimitiveSizeInBits();
+    if (Bits <= 64) {
+      APInt Raw(64, Key.ValueLo);
+      Raw = Raw.trunc(Bits);
+      ReplacementConst =
+          ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
+    } else {
+      APInt Raw(Bits, {Key.ValueLo, *Key.ValueHi});
+      ReplacementConst =
+          ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
+    }
+  } else if (ArgTy->isIntegerTy()) {
+    ReplacementConst = ConstantInt::get(ArgTy, Key.ValueLo);
+  }
+
+  SpecArg->replaceAllUsesWith(ReplacementConst);
+  return Clone;
+}
+
+//void insertGuard(CB, Clone, ArgIndex, ValueLo, ValueHi){
+  //TODO: implement
 //}
