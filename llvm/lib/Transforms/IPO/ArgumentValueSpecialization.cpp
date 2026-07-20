@@ -2,6 +2,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -169,6 +170,23 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
 
 }
 
+Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, uint64_t ValueHi) {
+
+
+  Constant *ReplacementConst;
+
+  if (ArgTy->isIntegerTy()) {
+  ReplacementConst = ConstantInt::get(ArgTy, ValueLo);
+  } else if (ArgTy->isFloatingPointTy()) {
+    unsigned Bits = ArgTy->getPrimitiveSizeInBits();
+    APInt Raw(128, {ValueLo, ValueHi});
+    Raw = Raw.trunc(Bits);
+    ReplacementConst = ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
+  } else {
+    llvm_unreachable("buildConstantFromBits: unsupported argument type reached specialization");
+  }
+    return ReplacementConst;
+  }
 
 Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
   ValueToValueMapTy Mappings;
@@ -181,23 +199,9 @@ Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
   Type *ArgTy = SpecArg->getType();
   Constant *ReplacementConst;
 
-  if (ArgTy->isFloatingPointTy()) { 
-    unsigned Bits = ArgTy->getPrimitiveSizeInBits();
-    if (Bits <= 64) {
-      unsigned Bits = ArgTy->getPrimitiveSizeInBits();
-      APInt Raw(128, {Key.ValueLo, *Key.ValueHi}); // Hi is 0 when unused for fp
-      Raw = Raw.trunc(Bits);
-      ReplacementConst =
-          ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
-    }
-  } else if (ArgTy->isIntegerTy()) {
-    ReplacementConst = ConstantInt::get(ArgTy, Key.ValueLo);
-  }
+  ReplacementConst = buildConstantFromBits(ArgTy, Key.ValueLo, Key.ValueHi.value_or(0));
 
   SpecArg->replaceAllUsesWith(ReplacementConst);
   return Clone;
 }
 
-//void insertGuard(CB, Clone, ArgIndex, ValueLo, ValueHi){
-  //TODO: implement
-//}
