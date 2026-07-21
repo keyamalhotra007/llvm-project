@@ -33,7 +33,7 @@ public:
   void insertGuard(CallBase *CB, Function *Clone, unsigned ArgIndex,
                     uint64_t ValueLo, std::optional<uint64_t> ValueHi);
 
-  Constant *buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, uint64_t ValueHi);
+  Constant *buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, std::optional<uint64_t> ValueHi);
 };
 
 } // namespace llvm

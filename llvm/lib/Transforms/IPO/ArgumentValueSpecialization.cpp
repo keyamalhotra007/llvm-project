@@ -160,7 +160,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
       ClonedFunctions[Key] = Clone;
       chargeGrowth(*Callee, TTI, Growth);
       Changed = true;
-      // insertGuard(CB, Clone, Key.ArgIndex, Key.ValueLo, Key.ValueHi);
+      insertGuard(CB, Clone, Key.ArgIndex, Key.ValueLo, Key.ValueHi);
     }
   }
 
@@ -170,7 +170,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
 
 }
 
-Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, uint64_t ValueHi) {
+Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, std::optional<uint64_t> ValueHi) {
 
 
   Constant *ReplacementConst;
@@ -179,7 +179,7 @@ Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64
   ReplacementConst = ConstantInt::get(ArgTy, ValueLo);
   } else if (ArgTy->isFloatingPointTy()) {
     unsigned Bits = ArgTy->getPrimitiveSizeInBits();
-    APInt Raw(128, {ValueLo, ValueHi});
+    APInt Raw(128, {ValueLo, *ValueHi});
     Raw = Raw.trunc(Bits);
     ReplacementConst = ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
   } else {
@@ -205,3 +205,52 @@ Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
   return Clone;
 }
 
+void ArgumentValueSpecialization::insertGuard(CallBase *CB, Function *Clone,
+                                               unsigned ArgIndex,
+                                               uint64_t ValueLo,
+                                               std::optional<uint64_t> ValueHi) {
+  // TODO: handle InvokeInst
+  if (isa<InvokeInst>(CB))
+    return;
+                                              
+  Value *ActualArg = CB->getArgOperand(ArgIndex);
+  Type *ArgTy = ActualArg->getType();
+
+  Constant *SpecConst = buildConstantFromBits(ArgTy, ValueLo, ValueHi); //constant to specialize function for 
+
+  IRBuilder<> Builder(CB); //insertion point immediately before the CB
+
+  Value *Cond = ArgTy->isIntegerTy() 
+                    ? Builder.CreateICmpEQ(ActualArg, SpecConst, "spec.cmp")
+                    : Builder.CreateFCmpOEQ(ActualArg, SpecConst, "spec.cmp");
+
+  // Then = hot path (call the specialized clone), Else = cold path (original call).
+  Instruction *ThenTerm = nullptr; // cond true
+  Instruction *ElseTerm = nullptr; // cond false
+  SplitBlockAndInsertIfThenElse(Cond, CB, &ThenTerm, &ElseTerm);
+
+  CB->moveBefore(ElseTerm->getIterator());
+
+  // CB stays where it is: that's the Else (cold) block.
+  CallBase *HotCall = cast<CallInst>(CB->clone()); //copies call instruction
+  HotCall->setCalledFunction(Clone); // point hot call at specialized clone
+  HotCall->insertBefore(ThenTerm->getIterator()); // place as last instruction in then block
+
+  // If the result is used, join the two call results with a PHI in the merge block.
+  if (!CB->use_empty()) { //use_empty: nothing uses return value
+    BasicBlock *ThenBB = ThenTerm->getParent();
+    BasicBlock *ElseBB = ElseTerm->getParent();
+    BasicBlock *MergeBB = ThenTerm->getSuccessor(0); // common successor of then and else
+
+    IRBuilder<> MergeBuilder(&*MergeBB->getFirstInsertionPt());
+    PHINode *PN = MergeBuilder.CreatePHI(CB->getType(), 2, "spec.retval"); //an empty PHI node with 2 incoming-value slots at the top of Merge
+
+    // Find every instruction in the function that currently has %call as one of its operands
+    // rewrite that operand to be %spec.retval (the PHI) instead.
+    CB->replaceAllUsesWith(PN);
+
+    // incoming edges 
+    PN->addIncoming(HotCall, ThenBB);
+    PN->addIncoming(CB, ElseBB);
+  }
+}
