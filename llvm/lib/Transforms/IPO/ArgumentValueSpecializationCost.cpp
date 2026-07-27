@@ -93,3 +93,84 @@ unsigned llvm::computeSpecializationScore(Function &Callee,
  
   return Score == 0 ? 1 : static_cast<unsigned>(Score);
 }
+
+// Work in Progress 
+Cost ArgSpecCostVisitor::getCodeSizeSavingsForUser(Instruction *User, Value *Use,
+                                                Constant *C) {
+  // We have already propagated a constant for this user.
+  if (KnownConstants.contains(User))
+    return 0;
+
+  // Cache the iterator before visiting.
+  LastVisited = Use ? KnownConstants.insert({Use, C}).first
+                    : KnownConstants.end();
+
+  Cost CodeSize = 0;
+  if (auto *I = dyn_cast<SwitchInst>(User)) {
+    CodeSize = estimateSwitchInst(*I); // special-cased: doesn't return a Constant
+  } else if (auto *I = dyn_cast<BranchInst>(User)) {
+    CodeSize = estimateBranchInst(*I); // special-cased: doesn't return a Constant
+  } else {
+    C = visit(*User); // generic InstVisitor dispatch
+    if (!C) // didn't fold -> stop, don't recurse further
+      return 0;
+  }
+
+  // Even though it doesn't make sense to bind switch and branch instructions
+  // with a constant, unlike any other instruction type, it prevents estimating
+  // their bonus multiple times.
+  KnownConstants.insert({User, C});
+
+  CodeSize += TTI.getInstructionCost(User, TargetTransformInfo::TCK_CodeSize);
+
+  LLVM_DEBUG(dbgs() << "ArgSpecialization:     {CodeSize = " << CodeSize
+                    << "} for user " << *User << "\n");
+
+  for (auto *U : User->users())
+    if (auto *UI = dyn_cast<Instruction>(U))
+      if (UI != User && isBlockExecutable(UI->getParent()))
+        CodeSize += getCodeSizeSavingsForUser(UI, User, C);
+
+  return CodeSize;
+}
+
+Cost ArgSpecCostVisitor::getCodeSizeSavingsForArg(Argument *A, Constant *C) {
+  for (auto *U : A->users())
+    if (auto *UI = dyn_cast<Instruction>(U))
+      if (isBlockExecutable(UI->getParent()))
+        CodeSize += getCodeSizeSavingsForUser(UI, A, C);
+  return CodeSize;
+}
+
+Constant *ArgSpecCostVisitor::findConstantFor(Value *V) const {
+  if (auto *C = dyn_cast<Constant>(V))
+    return C;                         // literal (e.g. a ConstantInt already in the IR)
+  return KnownConstants.lookup(V);    // our own substitution map
+}
+
+bool ArgSpecCostVisitor::canEliminateSuccessor(BasicBlock *BB,
+                                            BasicBlock *Succ) const {
+  unsigned I = 0;
+  return all_of(predecessors(Succ), [&I, BB, Succ, this](BasicBlock *Pred) {
+    return I++ < MaxBlockPredecessors &&
+           (Pred == BB || Pred == Succ || !isBlockExecutable(Pred));
+  });
+}
+
+Cost ArgSpecCostVisitor::estimateBasicBlocks(SmallVectorImpl<BasicBlock*> &WorkList) {
+  Cost CodeSize = 0;
+  while (!WorkList.empty()) {
+    BasicBlock *BB = WorkList.pop_back_val();
+    if (!DeadBlocks.insert(BB).second) continue;   // already counted
+
+    for (Instruction &I : *BB) {
+      if (KnownConstants.contains(&I)) continue;    // don't double count already-folded insts
+      CodeSize += TTI.getInstructionCost(&I, TCK_CodeSize);
+    }
+
+    for (BasicBlock *SuccBB : successors(BB))
+      if (isBlockExecutable(SuccBB) && canEliminateSuccessor(BB, SuccBB))
+        WorkList.push_back(SuccBB);   // propagate deadness transitively
+  }
+  return CodeSize;
+}

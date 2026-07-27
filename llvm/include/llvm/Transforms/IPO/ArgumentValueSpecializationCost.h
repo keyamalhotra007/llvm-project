@@ -50,6 +50,35 @@ unsigned computeSpecializationScore(Function &Callee,
                                     TargetTransformInfo &TTI,
                                     GrowthMap &Growth);
 
-} // namespace llvm
+
+class ArgSpecCostVisitor : public InstVisitor<ArgSpecCostVisitor, Constant *> {
+  std::function<BlockFrequencyInfo &(Function &)> GetBFI;
+  Function *F;
+  const DataLayout &DL;
+  TargetTransformInfo &TTI;
+
+  //fresh per candidate
+  DenseMap<Value*, Constant*> KnownConstants; // substitutions discovered so far
+  DenseSet<BasicBlock*> DeadBlocks; // blocks proven unreachable by folding
+  DenseSet<PHINode*> VisitedPHIs; // PHIs we've started resolving
+  SmallVector<Instruction*> PendingPHIs; // PHIs deferred to a second pass
+  DenseMap<Value*,Constant*>::iterator LastVisited; // see below
+
+public:
+  ArgSpecCostVisitor(std::function<BlockFrequencyInfo &(Function &)> GetBFI,
+                     Function *F, const DataLayout &DL, TargetTransformInfo &TTI)
+      : GetBFI(GetBFI), F(F), DL(DL), TTI(TTI) {}
+
+  bool isBlockExecutable(BasicBlock *BB) const {
+    return !DeadBlocks.contains(BB);
+
+  Constant *findConstantFor(Value *V) const {
+    auto It = KnownConstants.find(V);
+    return It == KnownConstants.end() ? nullptr : It->second;  // no lattice fallback
+  }
+
+};
+
+} // end namespace llvm
 
 #endif // LLVM_TRANSFORMS_IPO_ARGUMENTVALUESPECIALIZATIONCOST_H
