@@ -16,6 +16,7 @@
 #include "llvm/Analysis/ValueLattice.h"
 #include "llvm/Analysis/ValueLatticeUtils.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/SCCPSolver.h"
@@ -28,13 +29,10 @@ using namespace llvm;
 
 STATISTIC(NumSpecsCreated, "Number of specializations created");
 
-namespace llvm {
-
 static cl::opt<bool> ForceSpecialization(
-    "force-specialization", cl::init(false), cl::Hidden,
-    cl::desc(
-        "Force function specialization for every call site with a constant "
-        "argument"));
+    "force-specialization", cl::init(false), cl::Hidden, cl::desc(
+    "Force function specialization for every call site with a constant "
+    "argument"));
 
 static cl::opt<unsigned> MaxClones(
     "funcspec-max-clones", cl::init(3), cl::Hidden, cl::desc(
@@ -91,10 +89,6 @@ static cl::opt<bool> SpecializeLiteralConstant(
     cl::desc(
         "Enable specialization of functions that take a literal constant as an "
         "argument"));
-
-extern cl::opt<bool> ProfcheckDisableMetadataFixes;
-
-} // end namespace llvm
 
 bool InstCostVisitor::canEliminateSuccessor(BasicBlock *BB,
                                             BasicBlock *Succ) const {
@@ -229,8 +223,8 @@ Cost InstCostVisitor::getCodeSizeSavingsForUser(Instruction *User, Value *Use,
   Cost CodeSize = 0;
   if (auto *I = dyn_cast<SwitchInst>(User)) {
     CodeSize = estimateSwitchInst(*I);
-  } else if (auto *I = dyn_cast<CondBrInst>(User)) {
-    CodeSize = estimateCondBrInst(*I);
+  } else if (auto *I = dyn_cast<BranchInst>(User)) {
+    CodeSize = estimateBranchInst(*I);
   } else {
     C = visit(*User);
     if (!C)
@@ -280,7 +274,7 @@ Cost InstCostVisitor::estimateSwitchInst(SwitchInst &I) {
   return estimateBasicBlocks(WorkList);
 }
 
-Cost InstCostVisitor::estimateCondBrInst(CondBrInst &I) {
+Cost InstCostVisitor::estimateBranchInst(BranchInst &I) {
   assert(LastVisited != KnownConstants.end() && "Invalid iterator!");
 
   if (I.getCondition() != LastVisited->first)
@@ -406,6 +400,12 @@ Constant *InstCostVisitor::visitFreezeInst(FreezeInst &I) {
 Constant *InstCostVisitor::visitCallBase(CallBase &I) {
   assert(LastVisited != KnownConstants.end() && "Invalid iterator!");
 
+  // Look through calls to ssa_copy intrinsics.
+  if (auto *II = dyn_cast<IntrinsicInst>(&I);
+      II && II->getIntrinsicID() == Intrinsic::ssa_copy) {
+    return LastVisited->second;
+  }
+
   Function *F = I.getCalledFunction();
   if (!F || !canConstantFoldCallTo(&I, F))
     return nullptr;
@@ -455,13 +455,13 @@ Constant *InstCostVisitor::visitSelectInst(SelectInst &I) {
   assert(LastVisited != KnownConstants.end() && "Invalid iterator!");
 
   if (I.getCondition() == LastVisited->first) {
-    Value *V = LastVisited->second->isNullValue() ? I.getFalseValue()
+    Value *V = LastVisited->second->isZeroValue() ? I.getFalseValue()
                                                   : I.getTrueValue();
     return findConstantFor(V);
   }
   if (Constant *Condition = findConstantFor(I.getCondition()))
     if ((I.getTrueValue() == LastVisited->first && Condition->isOneValue()) ||
-        (I.getFalseValue() == LastVisited->first && Condition->isNullValue()))
+        (I.getFalseValue() == LastVisited->first && Condition->isZeroValue()))
       return LastVisited->second;
   return nullptr;
 }
@@ -544,19 +544,18 @@ Constant *FunctionSpecializer::getPromotableAlloca(AllocaInst *Alloca,
 
 // A constant stack value is an AllocaInst that has a single constant
 // value stored to it. Return this constant if such an alloca stack value
-// is a function argument and the value is an integer.
+// is a function argument.
 Constant *FunctionSpecializer::getConstantStackValue(CallInst *Call,
                                                      Value *Val) {
   if (!Val)
     return nullptr;
   Val = Val->stripPointerCasts();
+  if (auto *ConstVal = dyn_cast<ConstantInt>(Val))
+    return ConstVal;
   auto *Alloca = dyn_cast<AllocaInst>(Val);
-  if (!Alloca)
+  if (!Alloca || !Alloca->getAllocatedType()->isIntegerTy())
     return nullptr;
-  Constant *C = getPromotableAlloca(Alloca, Call);
-  if (!C || !C->getType()->isIntegerTy())
-    return nullptr;
-  return C;
+  return getPromotableAlloca(Alloca, Call);
 }
 
 // To support specializing recursive functions, it is important to propagate
@@ -612,15 +611,17 @@ void FunctionSpecializer::promoteConstantStackValues(Function *F) {
   }
 }
 
-// The SCCP solver inserts bitcasts for PredicateInfo. These interfere with the
-// promoteConstantStackValues() optimization.
+// ssa_copy intrinsics are introduced by the SCCP solver. These intrinsics
+// interfere with the promoteConstantStackValues() optimization.
 static void removeSSACopy(Function &F) {
   for (BasicBlock &BB : F) {
     for (Instruction &Inst : llvm::make_early_inc_range(BB)) {
-      auto *BC = dyn_cast<BitCastInst>(&Inst);
-      if (!BC || BC->getType() != BC->getOperand(0)->getType())
+      auto *II = dyn_cast<IntrinsicInst>(&Inst);
+      if (!II)
         continue;
-      Inst.replaceAllUsesWith(BC->getOperand(0));
+      if (II->getIntrinsicID() != Intrinsic::ssa_copy)
+        continue;
+      Inst.replaceAllUsesWith(II->getOperand(0));
       Inst.eraseFromParent();
     }
   }
@@ -632,7 +633,12 @@ void FunctionSpecializer::cleanUpSSA() {
     removeSSACopy(*F);
 }
 
+
 template <> struct llvm::DenseMapInfo<SpecSig> {
+  static inline SpecSig getEmptyKey() { return {~0U, {}}; }
+
+  static inline SpecSig getTombstoneKey() { return {~1U, {}}; }
+
   static unsigned getHashValue(const SpecSig &S) {
     return static_cast<unsigned>(hash_value(S));
   }
@@ -787,32 +793,9 @@ bool FunctionSpecializer::run() {
 
     // Update the known call sites to call the clone.
     for (CallBase *Call : S.CallSites) {
-      Function *Clone = S.Clone;
       LLVM_DEBUG(dbgs() << "FnSpecialization: Redirecting " << *Call
-                        << " to call " << Clone->getName() << "\n");
+                        << " to call " << S.Clone->getName() << "\n");
       Call->setCalledFunction(S.Clone);
-      auto &BFI = GetBFI(*Call->getFunction());
-      std::optional<uint64_t> Count =
-          BFI.getBlockProfileCount(Call->getParent());
-      if (Count && !ProfcheckDisableMetadataFixes) {
-        std::optional<llvm::Function::ProfileCount> MaybeCloneCount =
-            Clone->getEntryCount();
-        if (MaybeCloneCount) {
-          uint64_t CallCount = *Count + MaybeCloneCount->getCount();
-          Clone->setEntryCount(CallCount);
-          if (std::optional<llvm::Function::ProfileCount> MaybeOriginalCount =
-                  S.F->getEntryCount()) {
-            uint64_t OriginalCount = MaybeOriginalCount->getCount();
-            if (OriginalCount >= *Count) {
-              S.F->setEntryCount(OriginalCount - *Count);
-            } else {
-              // This should generally not happen as that would mean there are
-              // more computed calls to the function than what was recorded.
-              LLVM_DEBUG(S.F->setEntryCount(0));
-            }
-          }
-        }
-      }
     }
 
     Clones.push_back(S.Clone);
@@ -864,24 +847,14 @@ bool FunctionSpecializer::run() {
 }
 
 void FunctionSpecializer::removeDeadFunctions() {
-  for (Function *F : DeadFunctions) {
+  for (Function *F : FullySpecialized) {
     LLVM_DEBUG(dbgs() << "FnSpecialization: Removing dead function "
                       << F->getName() << "\n");
     if (FAM)
       FAM->clear(*F, F->getName());
-
-    // Remove all the callsites that were proven unreachable once, and replace
-    // them with poison.
-    for (User *U : make_early_inc_range(F->users())) {
-      assert((isa<CallInst>(U) || isa<InvokeInst>(U)) &&
-             "User of dead function must be call or invoke");
-      Instruction *CS = cast<Instruction>(U);
-      CS->replaceAllUsesWith(PoisonValue::get(CS->getType()));
-      CS->eraseFromParent();
-    }
     F->eraseFromParent();
   }
-  DeadFunctions.clear();
+  FullySpecialized.clear();
 }
 
 /// Clone the function \p F and remove the ssa_copy intrinsics added by
@@ -1036,13 +1009,7 @@ bool FunctionSpecializer::isCandidateFunction(Function *F) {
   if (F->isDeclaration() || F->arg_empty())
     return false;
 
-  if (F->isInterposable())
-    return false;
-
   if (F->hasFnAttribute(Attribute::NoDuplicate))
-    return false;
-
-  if (F->hasOptSize())
     return false;
 
   // Do not specialize the cloned function again.
@@ -1074,9 +1041,6 @@ Function *FunctionSpecializer::createSpecialization(Function *F,
   // The original function does not neccessarily have internal linkage, but the
   // clone must.
   Clone->setLinkage(GlobalValue::InternalLinkage);
-
-  if (F->getEntryCount() && !ProfcheckDisableMetadataFixes)
-    Clone->setEntryCount(0);
 
   // Initialize the lattice state of the arguments of the function clone,
   // marking the argument on which we specialized the function constant
@@ -1251,11 +1215,8 @@ void FunctionSpecializer::updateCallSites(Function *F, const Spec *Begin,
 
   // If the function has been completely specialized, the original function
   // is no longer needed. Mark it unreachable.
-  // NOTE: If the address of a function is taken, we cannot treat it as dead
-  // function.
-  if (NCallsLeft == 0 && Solver.isArgumentTrackedFunction(F) &&
-      !F->hasAddressTaken()) {
+  if (NCallsLeft == 0 && Solver.isArgumentTrackedFunction(F)) {
     Solver.markFunctionUnreachable(F);
-    DeadFunctions.insert(F);
+    FullySpecialized.insert(F);
   }
 }
