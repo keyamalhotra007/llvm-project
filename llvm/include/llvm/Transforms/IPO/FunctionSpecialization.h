@@ -108,7 +108,8 @@ using ConstMap = DenseMap<Value *, Constant *>;
 // Specialization signature, used to uniquely designate a specialization within
 // a function.
 struct SpecSig {
-  // Hashing support, used to distinguish between ordinary and empty keys.
+  // Hashing support, used to distinguish between ordinary, empty, or tombstone
+  // keys.
   unsigned Key = 0;
   SmallVector<ArgInfo, 4> Args;
 
@@ -197,7 +198,7 @@ private:
 
   Cost estimateBasicBlocks(SmallVectorImpl<BasicBlock *> &WorkList);
   Cost estimateSwitchInst(SwitchInst &I);
-  Cost estimateCondBrInst(CondBrInst &I);
+  Cost estimateBranchInst(BranchInst &I);
 
   // Transitively Incoming Values (TIV) is a set of Values that can "feed" a
   // value to the initial PHI-node. It is defined like this:
@@ -245,7 +246,7 @@ class FunctionSpecializer {
   std::function<AssumptionCache &(Function &)> GetAC;
 
   SmallPtrSet<Function *, 32> Specializations;
-  SmallPtrSet<Function *, 32> DeadFunctions;
+  SmallPtrSet<Function *, 32> FullySpecialized;
   DenseMap<Function *, CodeMetrics> FunctionMetrics;
   DenseMap<Function *, unsigned> FunctionGrowth;
   unsigned NGlobals = 0;
@@ -268,8 +269,6 @@ public:
     auto &TTI = GetTTI(*F);
     return InstCostVisitor(GetBFI, F, M.getDataLayout(), TTI, Solver);
   }
-
-  bool isDeadFunction(Function *F) { return DeadFunctions.contains(F); }
 
 private:
   Constant *getPromotableAlloca(AllocaInst *Alloca, CallInst *Call);

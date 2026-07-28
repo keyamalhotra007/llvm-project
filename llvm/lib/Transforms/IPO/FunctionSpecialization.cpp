@@ -795,13 +795,14 @@ bool FunctionSpecializer::run() {
       std::optional<uint64_t> Count =
           BFI.getBlockProfileCount(Call->getParent());
       if (Count && !ProfcheckDisableMetadataFixes) {
-        std::optional<uint64_t> MaybeCloneCount = Clone->getEntryCount();
+        std::optional<llvm::Function::ProfileCount> MaybeCloneCount =
+            Clone->getEntryCount();
         if (MaybeCloneCount) {
-          uint64_t CallCount = *Count + *MaybeCloneCount;
+          uint64_t CallCount = *Count + MaybeCloneCount->getCount();
           Clone->setEntryCount(CallCount);
-          if (std::optional<uint64_t> MaybeOriginalCount =
+          if (std::optional<llvm::Function::ProfileCount> MaybeOriginalCount =
                   S.F->getEntryCount()) {
-            uint64_t OriginalCount = *MaybeOriginalCount;
+            uint64_t OriginalCount = MaybeOriginalCount->getCount();
             if (OriginalCount >= *Count) {
               S.F->setEntryCount(OriginalCount - *Count);
             } else {
