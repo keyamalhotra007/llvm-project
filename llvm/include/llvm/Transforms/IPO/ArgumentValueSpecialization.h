@@ -10,15 +10,25 @@
 
 namespace llvm {
 
-struct CloneKey {
-  Function *Callee;
+struct ArgSpecValue {
   unsigned ArgIndex;
   uint64_t ValueLo;
-  std::optional<uint64_t> ValueHi;
+  std::optional<uint64_t>  ValueHi = 0;
+};
+
+struct CloneKey {
+  Function *Callee;
+  SmallVector<ArgSpecValue, 4> Args;
 
   bool operator<(const CloneKey &Other) const {
-    return std::tie(Callee, ArgIndex, ValueLo, ValueHi) <
-           std::tie(Other.Callee, Other.ArgIndex, Other.ValueLo, Other.ValueHi);
+    if (Callee != Other.Callee) return Callee < Other.Callee;
+    if (Args.size() != Other.Args.size()) return Args.size() < Other.Args.size();
+    for (unsigned I = 0, E = Args.size(); I != E; ++I) {
+      if (Args[I].ArgIndex != Other.Args[I].ArgIndex) return Args[I].ArgIndex < Other.Args[I].ArgIndex;
+      if (Args[I].ValueLo != Other.Args[I].ValueLo)   return Args[I].ValueLo   < Other.Args[I].ValueLo;
+      if (Args[I].ValueHi != Other.Args[I].ValueHi)   return Args[I].ValueHi   < Other.Args[I].ValueHi;
+    }
+    return false;
   }
 };
 
@@ -30,8 +40,7 @@ public:
 
   Function *cloneAndSpecialize(const CloneKey &Key);
 
-  void insertGuard(CallBase *CB, Function *Clone, unsigned ArgIndex,
-                    uint64_t ValueLo, std::optional<uint64_t> ValueHi);
+  void insertGuard(CallBase *CB, Function *Clone, ArrayRef<ArgSpecValue> ArgSpecs);
 
   Constant *buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, std::optional<uint64_t> ValueHi);
 };

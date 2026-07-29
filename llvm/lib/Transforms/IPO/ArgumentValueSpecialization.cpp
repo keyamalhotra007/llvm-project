@@ -115,58 +115,119 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
   GrowthMap Growth; //accumulates how much code size each function has grown due to specializations so far
   std::map<CloneKey, Function *> ClonedFunctions; //dedup cache: different callsites, same clone key -> share clone
 
-  // Pass 1: score everything, track best ArgIndex per call site.
-  DenseMap<CallBase *, std::pair<unsigned, unsigned>> BestArgForCallSite; //map CB to the best {ArgIndex, Score} found so fare
-  SmallVector<unsigned, 0> Scores(Candidates.size()); //store score for every candidate by index
-
   // for every CB which single argument index gives the maximum specialization benefit
-  for (unsigned I = 0, size = Candidates.size(); I != size; ++I) {
-    auto &Cand = Candidates[I];
-    Function *Callee = Cand.Callee;
+  constexpr double JointPercentFloor = 90.0; //an arg only enters joint arg consideration if it's hot on its own
+  constexpr unsigned MaxJointArity = 3; //combo size cap
+
+  auto GetBFI = [&FAM](Function &F) -> BlockFrequencyInfo & {
+    return FAM.getResult<BlockFrequencyAnalysis>(F);
+  };
+
+  MapVector<CallBase *, SmallVector<unsigned, 8>> CandidatesByCB; // regroup by CB
+  for (unsigned I = 0, E = Candidates.size(); I != E; ++I)
+    CandidatesByCB[Candidates[I].CB].push_back(I);
+
+  //Per call site, try every legal subset of its hot args and keep only the best-scoring one.
+  struct SubsetResult {
+    SmallVector<unsigned, 4> CandIdxs;
+    double JointPercentBound;
+    Cost CodeSizeSavings;
+  };
+
+  DenseMap<CallBase *, SubsetResult> BestForCallSite; // needed to specialize 
+  DenseMap<CallBase *, unsigned> BestScoreForCallSite; // running max
+
+  for (auto &[CB, Idxs] : CandidatesByCB) {
+    SmallVector<unsigned, 8> Hot;
+    for (unsigned Idx : Idxs)
+      if (Candidates[Idx].Percentage > JointPercentFloor)
+        Hot.push_back(Idx);
+    if (Hot.empty())
+      continue;
+
+
+    Function *Callee = Candidates[Hot[0]].Callee;
     TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(*Callee);
 
-    unsigned Score = computeSpecializationScore(*Callee, Cand.Percentage, TTI, Growth);
-    Scores[I] = Score;
-    if (Score == 0) //reject
-      continue;
+    Function *Caller = CB->getFunction();
+    BlockFrequencyInfo &BFI = GetBFI(*Caller);
+    BasicBlock *BB = CB->getParent();
 
-    CallBase *CB = Cand.CB;
-    auto It = BestArgForCallSite.find(CB); //Have we already recorded a best arg?
-    if (It == BestArgForCallSite.end() || Score > It->second.second)
-      BestArgForCallSite[CB] = {Cand.ArgIndex, Score};
-  }
+    double CallFreq = static_cast<double>(BFI.getBlockFreq(BB).getFrequency()) /
+                    static_cast<double>(BFI.getEntryFreq().getFrequency());
 
-  // clone/guard only for the winning ArgIndex of each call site.
-  for (unsigned I = 0, size = Candidates.size(); I != size; ++I) {
-    auto &Cand = Candidates[I];
-    unsigned Score = Scores[I];
-    if (Score == 0)
-      continue;
 
-    CallBase *CB = Cand.CB;
-    auto BestIt = BestArgForCallSite.find(CB);
-    if (BestIt == BestArgForCallSite.end() || BestIt->second.first != Cand.ArgIndex)
-      continue;
+    unsigned MaxArity = std::min<unsigned>(Hot.size(), MaxJointArity);
+    unsigned FullMask = (1u << Hot.size()) - 1;
 
-    Function *Callee = Cand.Callee;
-    TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(*Callee); //needed for chargeGrowth
-    CloneKey Key{Cand.Callee, Cand.ArgIndex, Cand.ValueLo, Cand.ValueHi};
+    for (unsigned Mask = 1; Mask <= FullMask; ++Mask) {
+      if ((unsigned)llvm::popcount(Mask) > MaxArity) 
+        continue;
 
-    Function *Clone = nullptr;
-    if (auto CloneIt = ClonedFunctions.find(Key); CloneIt != ClonedFunctions.end()) {
-      Clone = CloneIt->second; //if some other call site already created a clone for this exact (Callee, ArgIndex, Value) combination, reuse it 
-    } else {
-      Clone = cloneAndSpecialize(Key);
-      ClonedFunctions[Key] = Clone;
-      chargeGrowth(*Callee, TTI, Growth);
-      Changed = true;
-      insertGuard(CB, Clone, Key.ArgIndex, Key.ValueLo, Key.ValueHi);
+      SmallVector<unsigned, 4> Combo;
+      SmallVector<ArgSubstitution, 4> Substitutions;
+      double JointPercentBound = 0.0;
+      for (unsigned Bit = 0; Bit < Hot.size(); ++Bit) {
+        if (!(Mask & (1u << Bit)))
+          continue;
+        unsigned Idx = Hot[Bit];
+        auto &Cand = Candidates[Idx];
+        Combo.push_back(Idx);
+        JointPercentBound += Cand.Percentage;
+
+        Argument *Arg = Callee->getArg(Cand.ArgIndex);
+        Constant *C = buildConstantFromBits(Arg->getType(), Cand.ValueLo, Cand.ValueHi);
+        Substitutions.push_back({Arg, C});
+      }
+      // Bonferroni bound: valid lower bound on P(A∩B∩...) given per-arg P(A),P(B)...
+      JointPercentBound = std::max(0.0, JointPercentBound - 100.0 * (Combo.size() - 1));
+
+      Cost CodeSizeSavings = 0;
+      unsigned Score = computeSpecializationScore(*Callee, Substitutions,
+                                                  JointPercentBound, CallFreq,
+                                                  GetBFI, TTI, Growth, &CodeSizeSavings);
+      if (Score == 0)
+        continue;
+
+      auto It = BestScoreForCallSite.find(CB);
+      if (It == BestScoreForCallSite.end() || Score > It->second) {
+        BestScoreForCallSite[CB] = Score;
+        BestForCallSite[CB] = {Combo, JointPercentBound, CodeSizeSavings};
+      }
     }
   }
 
-  if (!Changed)
-    return PreservedAnalyses::all();
-  return PreservedAnalyses::none();
+    // clone/guard only for the winning ArgIndex of each call site.
+    for (auto &[CB, Best] : BestForCallSite) {
+    Function *Callee = Candidates[Best.CandIdxs[0]].Callee;
+    TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(*Callee);
+
+    CloneKey Key;
+    Key.Callee = Callee;
+    for (unsigned Idx : Best.CandIdxs) {
+      auto &C = Candidates[Idx];
+      Key.Args.push_back({C.ArgIndex, C.ValueLo, C.ValueHi});
+    }
+    llvm::sort(Key.Args, [](const ArgSpecValue &A, const ArgSpecValue &B) {
+      return A.ArgIndex < B.ArgIndex;
+    });
+
+    Function *Clone = nullptr;
+    auto CloneIt = ClonedFunctions.find(Key);
+    if (CloneIt != ClonedFunctions.end()) {
+      Clone = CloneIt->second;
+    } else {
+      Clone = cloneAndSpecialize(Key);       // now RAUWs every Args[i], not just one
+      ClonedFunctions[Key] = Clone;
+      chargeGrowth(*Callee, TTI, Growth, Best.CodeSizeSavings);
+      Changed = true;
+    }
+    insertGuard(CB, Clone, Key.Args);        // generalized: AND-chain of compares
+  }
+
+    if (!Changed)
+      return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
 
 }
 
@@ -191,38 +252,38 @@ Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64
 Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
   ValueToValueMapTy Mappings;
   Function *Clone = CloneFunction(Key.Callee, Mappings);
-  Clone->setName(Key.Callee->getName() + ".argspec." +
-                 Twine(Key.ArgIndex) + "." + Twine(Key.ValueLo)); //TODO: Can remove ValueLo later after debugging done
 
+  std::string Name = (Key.Callee->getName() + ".argspec").str();
+  for (const ArgSpecValue &AV : Key.Args)
+    Name += ("." + Twine(AV.ArgIndex) + "." + Twine(AV.ValueLo)).str();
+  Clone->setName(Name); 
 
-  Argument *SpecArg = Clone->getArg(Key.ArgIndex);
-  Type *ArgTy = SpecArg->getType();
-  Constant *ReplacementConst;
+  for (const ArgSpecValue &AV : Key.Args) {
+    Argument *SpecArg = Clone->getArg(AV.ArgIndex);
+    Type *ArgTy = SpecArg->getType();
+    Constant *ReplacementConst = buildConstantFromBits(ArgTy, AV.ValueLo, AV.ValueHi);
+    SpecArg->replaceAllUsesWith(ReplacementConst);
+  }
 
-  ReplacementConst = buildConstantFromBits(ArgTy, Key.ValueLo, Key.ValueHi.value_or(0));
-
-  SpecArg->replaceAllUsesWith(ReplacementConst);
   return Clone;
 }
 
 void ArgumentValueSpecialization::insertGuard(CallBase *CB, Function *Clone,
-                                               unsigned ArgIndex,
-                                               uint64_t ValueLo,
-                                               std::optional<uint64_t> ValueHi) {
-  // TODO: handle InvokeInst
+                                               ArrayRef<ArgSpecValue> ArgSpecs) {
   if (isa<InvokeInst>(CB))
-    return;
-                                              
-  Value *ActualArg = CB->getArgOperand(ArgIndex);
-  Type *ArgTy = ActualArg->getType();
+    return; // bailing on invoke
 
-  Constant *SpecConst = buildConstantFromBits(ArgTy, ValueLo, ValueHi); //constant to specialize function for 
+  IRBuilder<> Builder(CB);
+  Value *Cond = nullptr;
+  for (auto &AV : ArgSpecs) {
+    Value *ArgVal = CB->getArgOperand(AV.ArgIndex);
+    Value *ConstVal = buildConstantFromBits(ArgVal->getType(), AV.ValueLo, AV.ValueHi);
+    Value *Cmp = ArgVal->getType()->isFloatingPointTy()
+                     ? Builder.CreateFCmpOEQ(ArgVal, ConstVal)
+                     : Builder.CreateICmpEQ(ArgVal, ConstVal);
+    Cond = Cond ? Builder.CreateAnd(Cond, Cmp) : Cmp;
+  }
 
-  IRBuilder<> Builder(CB); //insertion point immediately before the CB
-
-  Value *Cond = ArgTy->isIntegerTy() 
-                    ? Builder.CreateICmpEQ(ActualArg, SpecConst, "spec.cmp")
-                    : Builder.CreateFCmpOEQ(ActualArg, SpecConst, "spec.cmp");
 
   // Then = hot path (call the specialized clone), Else = cold path (original call).
   Instruction *ThenTerm = nullptr; // cond true
