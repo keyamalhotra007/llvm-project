@@ -35,6 +35,12 @@ struct ArgCandidate {
   unsigned Percentage;
 };
 
+/// One argument's constant substitution for a specialization candidate.
+  struct ArgSubstitution {
+    Argument *Arg;
+    Constant *C;
+  };
+
 /// Tracks accumulated clone-codesize growth per original callee, so that
 /// repeated specializations of the same function (for different call sites)
 /// are charged against a shared budget rather than each being evaluated in
@@ -51,17 +57,22 @@ LLVM_ABI bool isEligibleForSpecialization(Function &F);
 
 /// Call after committing to a specialization, to charge its size against the
 /// callee's growth budget for subsequent candidates.
+/// Call after committing to a specialization, to charge its size against the
+/// callee's growth budget for subsequent candidates.
 LLVM_ABI void chargeGrowth(Function &Callee, TargetTransformInfo &TTI,
-                   GrowthMap &Growth, Cost CodeSizeSavings);
+                            GrowthMap &Growth, Cost CodeSizeSavings);
 
 /// Score a candidate specialization: either a single hot argument, or a
 /// combination of several hot arguments at the same call site. Higher is
 /// better. Returns 0 if the hard size/growth gates are violated (i.e. this
 /// candidate must not be specialized at all).
-LLVM_ABI unsigned computeSpecializationScore(Function &Callee,
-                                             uint8_t Percentage,
-                                             TargetTransformInfo &TTI,
-                                             GrowthMap &Growth);
+unsigned computeSpecializationScore(Function &Callee,
+                                     ArrayRef<ArgSubstitution> Substitutions,
+                                     double JointPercentBound, double CallFreq,
+                                     std::function<BlockFrequencyInfo &(Function &)> GetBFI,
+                                     TargetTransformInfo &TTI, GrowthMap &Growth,
+                                     Cost *OutCodeSizeSavings = nullptr);
+                                     
 
 class ArgSpecCostVisitor : public InstVisitor<ArgSpecCostVisitor, Constant *> {
   std::function<BlockFrequencyInfo &(Function &)> GetBFI;
@@ -108,6 +119,8 @@ public:
   // It weights each instruction's latency cost by its relative execution frequency, obtained from BlockFrequencyInfo,
   // so instructions in hot paths matter more than those in cold paths.
   LLVM_ABI Cost getLatencySavingsForKnownConstants();
+
+
 
 private:
   friend class InstVisitor<ArgSpecCostVisitor, Constant *>;

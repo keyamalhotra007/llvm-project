@@ -78,6 +78,78 @@ bool llvm::isEligibleForSpecialization(Function &F) {
   return true;
 }
 
+// Arguments:
+// Callee: function being considered for specialization.
+// Substitutions: combination of arguments being fixed to constants
+// JointPercentBound: the estimated percentage of call sites where all args in this combo simultaneously hold these constant values
+// CallFreq: how often the callee is invoked overall 
+// GetBFI: to fetch BlockFrequencyInfo for a function
+// TTI: used to price individual instructions
+// Growth: running map of already-committed code growth per function
+// OutCodeSizeSavings: output parameter to hand back the raw size-savings estimate
+
+unsigned llvm::computeSpecializationScore(
+    Function &Callee, ArrayRef<ArgSubstitution> Substitutions,
+    double JointPercentBound, double CallFreq,
+    std::function<BlockFrequencyInfo &(Function &)> GetBFI,
+    TargetTransformInfo &TTI, GrowthMap &Growth, Cost *OutCodeSizeSavings) {
+
+  if (!isEligibleForSpecialization(Callee))
+    return 0;
+
+  const DataLayout &DL = Callee.getParent()->getDataLayout();
+  // Fresh visitor per candidate - KnownConstants, DeadBlocks,
+  // VisitedPHIs, PendingPHIs all accumulate across the calls
+  ArgSpecCostVisitor Visitor(GetBFI, &Callee, DL, TTI);
+
+  Cost CodeSizeSavings = 0;
+  for (const ArgSubstitution &Sub : Substitutions) 
+    CodeSizeSavings += Visitor.getCodeSizeSavingsForArg(Sub.Arg, Sub.C); //compute the code-size savings from replacing that argument with its proposed constant
+
+  CodeSizeSavings += Visitor.getCodeSizeSavingsFromPendingPHIs();
+
+  Cost LatencySavings = Visitor.getLatencySavingsForKnownConstants();
+
+  if (!CodeSizeSavings.isValid() || !LatencySavings.isValid())
+    return 0; // TTI declined to cost something involved - treat as unscoreable
+
+  int64_t SizeSaved = CodeSizeSavings.getValue();
+  int64_t LatSaved = LatencySavings.getValue();
+  if (SizeSaved <= 0 && LatSaved <= 0)
+    return 0; // no benefit at all, reject before touching the growth budget
+
+  // Hard growth gate. This is a *peek*, not a charge: Growth is only
+  // mutated by chargeGrowth() in Pass 2, on the actual winning combo.
+  unsigned FnSize = estimateFunctionCodeSize(Callee, TTI);
+  unsigned ProspectiveGrowth =
+      (SizeSaved > 0 && (unsigned)SizeSaved < FnSize) ? FnSize - SizeSaved : FnSize;
+  unsigned CommittedGrowth = Growth.lookup(&Callee);
+
+  constexpr unsigned GrowthBudgetMultiplier = 3; // TODO: tune after real perf data
+  if (CommittedGrowth + ProspectiveGrowth > GrowthBudgetMultiplier * FnSize)
+    return 0;
+
+  constexpr double LatencyWeight = 1.0;      // TODO: tune
+  constexpr double GuardOverheadWeight = 1.0; // TODO: tune
+
+  double Benefit = (double(SizeSaved) + LatencyWeight * double(LatSaved)) *
+                    (JointPercentBound / 100.0) * CallFreq;
+  // A combo of N args needs an N-way ANDed guard; each extra compare adds
+  // miss-branch overhead on the (100-JointPercentBound)% of calls that don't
+  // match. Scale by combo size so gratuitously large combos need a clearly
+  // bigger joint win to be worth it.
+  double GuardCost = GuardOverheadWeight *
+                      (1.0 - JointPercentBound / 100.0) * Substitutions.size();
+
+  double Score = Benefit - GuardCost;
+  if (Score <= 0.0)
+    return 0;
+
+  if (OutCodeSizeSavings)
+    *OutCodeSizeSavings = CodeSizeSavings;
+  return static_cast<unsigned>(Score);
+}
+
 
 
 void llvm::chargeGrowth(Function &Callee, TargetTransformInfo &TTI,
@@ -138,6 +210,17 @@ Cost ArgSpecCostVisitor::getCodeSizeSavingsForUser(Instruction *User, Value *Use
   return CodeSize;
 }
 
+Cost ArgSpecCostVisitor::getCodeSizeSavingsFromPendingPHIs() {
+  Cost CodeSize;
+  while (!PendingPHIs.empty()) {
+    Instruction *Phi = PendingPHIs.pop_back_val();
+    // The pending PHIs could have been proven dead by now.
+    if (isBlockExecutable(Phi->getParent()))
+      CodeSize += getCodeSizeSavingsForUser(Phi);
+  }
+  return CodeSize;
+}
+
 /// Compute the latency savings from replacing all arguments with constants for
 /// a specialization candidate. As this function computes the latency savings
 /// for all Instructions in KnownConstants at once, it should be called only
@@ -173,9 +256,6 @@ Cost ArgSpecCostVisitor::getLatencySavingsForKnownConstants() {
 
   return TotalLatency;
 }
-
-
-
 
 Constant *ArgSpecCostVisitor::findConstantFor(Value *V) const {
   if (auto *C = dyn_cast<Constant>(V)) 
