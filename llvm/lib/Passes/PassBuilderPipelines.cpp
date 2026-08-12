@@ -44,6 +44,7 @@
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/Annotation2Metadata.h"
 #include "llvm/Transforms/IPO/ArgumentPromotion.h"
+#include "llvm/Transforms/IPO/ArgumentValueSpecialization.h"
 #include "llvm/Transforms/IPO/Attributor.h"
 #include "llvm/Transforms/IPO/CalledValuePropagation.h"
 #include "llvm/Transforms/IPO/ConstantMerge.h"
@@ -225,6 +226,10 @@ static cl::opt<bool>
     EnableDFAJumpThreading("enable-dfa-jump-thread",
                            cl::desc("Enable DFA jump threading"),
                            cl::init(false), cl::Hidden);
+
+static cl::opt<bool> EnableArgumentValueSpecialization(
+    "enable-argument-value-specialization", cl::init(false), cl::Hidden,
+    cl::desc("Enable PEBS-guided argument value specialization"));
 
 static cl::opt<bool>
     EnableHotColdSplit("hot-cold-split",
@@ -1145,6 +1150,9 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
       MPM.addPass(
           PGOIndirectCallPromotion(true /* IsInLTO */, true /* SamplePGO */));
   }
+
+    if (EnableArgumentValueSpecialization)
+    MPM.addPass(ArgumentValueSpecialization());
 
   // Try to perform OpenMP specific optimizations on the module. This is a
   // (quick!) no-op if there are no OpenMP runtime calls present in the module.
