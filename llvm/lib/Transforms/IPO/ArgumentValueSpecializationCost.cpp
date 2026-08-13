@@ -17,7 +17,7 @@
 using namespace llvm;
 
 static cl::opt<unsigned> ArgSpecHotnessThreshold(
-    "argspec-hotness-threshold", cl::init(90), cl::Hidden,
+    "argspec-hotness-threshold", cl::init(50), cl::Hidden,
     cl::desc("Minimum hotness percentage required for an "
              "argument value candidate to be considered for specialization"));
 
