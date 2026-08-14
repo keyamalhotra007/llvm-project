@@ -322,7 +322,7 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
       uint64_t Value, Percentage;
       if (ValueStr.getAsInteger(10, Value) || PercentageStr.getAsInteger(10, Percentage))
         return false;
-      IntArgSamples[Slot] = {Value, Percentage};
+      IntArgSamples[Slot] = {Value, static_cast<uint8_t>(Percentage)};
 
     }
 
@@ -343,7 +343,7 @@ static bool ParseLine(const StringRef &Input, LineType &LineTy, uint32_t &Depth,
       uint64_t Lo, Hi, Percentage;
       if (LoStr.getAsInteger(10, Lo) || HiStr.getAsInteger(10, Hi) || PercentageStr.getAsInteger(10, Percentage))
         return false;
-      FpArgSamples[Slot] = {FpValue{Lo, Hi}, Percentage};
+      FpArgSamples[Slot] = {FpValue{Lo, Hi}, static_cast<uint8_t>(Percentage)};
     
   }
 
