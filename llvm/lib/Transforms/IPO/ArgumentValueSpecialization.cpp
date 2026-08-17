@@ -15,6 +15,9 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "argument-value-specialization"
 #include "llvm/Transforms/IPO/ArgumentValueSpecializationCost.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h" 
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -64,7 +67,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         unsigned FpPos = 0;
 
         Function *Callee = CB->getCalledFunction();
-        if (!Callee)
+        if (!Callee || Callee->isIntrinsic())
           continue;
 
         FunctionType *FTy = Callee->getFunctionType();
@@ -72,12 +75,25 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         
 
         for (unsigned ArgIndex = 0; ArgIndex < NumArgs; ++ArgIndex) {
-        
+
           Type *ValueTy = FTy->getParamType(ArgIndex);
 
-          if (ValueTy->isIntegerTy() || ValueTy->isPointerTy()) { 
-            if (!IntMD) continue;        
-            
+          // Only collect candidates for integer or floating-point formal
+          // parameter types. Other types (pointers, aggregates, vectors,
+          // etc.) are unsupported by buildConstantFromBits and should be
+          // skipped to avoid crashes.
+          if (ValueTy->isIntegerTy()) {
+            if (!IntMD)
+              continue;
+
+            unsigned NeededIdx = IntPos * 2 + 2;
+            if (IntMD->getNumOperands() <= NeededIdx) {
+              LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: metadata for callee "
+                                << Callee->getName() << " does not cover int-formal "
+                                << ArgIndex << ", skipping\n");
+              continue;
+            }
+
             auto *ValMeta = cast<ConstantAsMetadata>(IntMD->getOperand(IntPos * 2 + 1));
             auto *ValConst = cast<ConstantInt>(ValMeta->getValue());
             uint64_t Value = ValConst->getZExtValue();
@@ -90,8 +106,17 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
             ++IntPos;
 
           } else if (ValueTy->isFloatingPointTy()) {
-            if (!FpMD) continue;
-            
+            if (!FpMD)
+              continue;
+
+            unsigned NeededIdx = FpPos * 3 + 3;
+            if (FpMD->getNumOperands() <= NeededIdx) {
+              LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: metadata for callee "
+                                << Callee->getName() << " does not cover fp-formal "
+                                << ArgIndex << ", skipping\n");
+              continue;
+            }
+
             auto *LoMeta = cast<ConstantAsMetadata>(FpMD->getOperand(FpPos * 3 + 1));
             auto *LoConst = cast<ConstantInt>(LoMeta->getValue());
             uint64_t Lo = LoConst->getZExtValue();
@@ -104,9 +129,14 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
             auto *PctConst = cast<ConstantInt>(PctMeta->getValue());
             uint8_t Percentage = (uint8_t)PctConst->getZExtValue();
 
-            Candidates.push_back({Callee, ArgIndex, Lo, Hi, CB, Percentage}); 
+            Candidates.push_back({Callee, ArgIndex, Lo, Hi, CB, Percentage});
 
             ++FpPos;
+          } else {
+            // Unsupported formal parameter type: skip.
+            LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: skipping unsupported formal type "
+                              << *ValueTy << " for callee " << Callee->getName() << "\n");
+            continue;
           }
         }
       }
@@ -167,6 +197,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
       SmallVector<unsigned, 4> Combo;
       SmallVector<ArgSubstitution, 4> Substitutions;
       double JointPercentBound = 0.0;
+      bool SkipCombo = false;
       for (unsigned Bit = 0; Bit < Hot.size(); ++Bit) {
         if (!(Mask & (1u << Bit)))
           continue;
@@ -177,8 +208,14 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
 
         Argument *Arg = Callee->getArg(Cand.ArgIndex);
         Constant *C = buildConstantFromBits(Arg->getType(), Cand.ValueLo, Cand.ValueHi);
+        if (!C) {
+          SkipCombo = true;
+          break;
+        }
         Substitutions.push_back({Arg, C});
       }
+      if (SkipCombo)
+        continue;
       // Bonferroni bound: valid lower bound on P(A∩B∩...) given per-arg P(A),P(B)...
       JointPercentBound = std::max(0.0, JointPercentBound - 100.0 * (Combo.size() - 1));
 
@@ -217,12 +254,14 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
     if (CloneIt != ClonedFunctions.end()) {
       Clone = CloneIt->second;
     } else {
-      Clone = cloneAndSpecialize(Key);       // now RAUWs every Args[i], not just one
+      Clone = cloneAndSpecialize(Key); // now RAUWs every Args[i], not just one
+      if (!Clone)
+        continue; // couldn't build a valid clone for this key
       ClonedFunctions[Key] = Clone;
       chargeGrowth(*Callee, TTI, Growth, Best.CodeSizeSavings);
       Changed = true;
     }
-    insertGuard(CB, Clone, Key.Args);        // generalized: AND-chain of compares
+    insertGuard(CB, Clone, Key.Args); // generalized: AND-chain of compares
   }
 
     if (!Changed)
@@ -233,21 +272,32 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
 
 Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64_t ValueLo, std::optional<uint64_t> ValueHi) {
 
-
-  Constant *ReplacementConst;
+  Constant *ReplacementConst = nullptr;
 
   if (ArgTy->isIntegerTy()) {
-  ReplacementConst = ConstantInt::get(ArgTy, ValueLo);
-  } else if (ArgTy->isFloatingPointTy()) {
+    ReplacementConst = ConstantInt::get(ArgTy, ValueLo);
+  } else if (ArgTy->isFloatTy() || ArgTy->isDoubleTy()) {
+    if (!ValueHi.has_value()) {
+      LLVM_DEBUG(dbgs() << "buildConstantFromBits: missing ValueHi for FP type " << *ArgTy
+                        << ", skipping candidate\n");
+      return nullptr;
+    }
     unsigned Bits = ArgTy->getPrimitiveSizeInBits();
     APInt Raw(128, {ValueLo, *ValueHi});
     Raw = Raw.trunc(Bits);
     ReplacementConst = ConstantFP::get(ArgTy->getContext(), APFloat(ArgTy->getFltSemantics(), Raw));
+  } else if (ArgTy->isFloatingPointTy()) {
+    LLVM_DEBUG(dbgs() << "buildConstantFromBits: unsupported floating-point type " << *ArgTy
+                      << ", skipping candidate\n");
+    return nullptr;
   } else {
-    llvm_unreachable("buildConstantFromBits: unsupported argument type reached specialization");
+    LLVM_DEBUG(dbgs() << "buildConstantFromBits: unsupported argument type " << *ArgTy
+                      << ", skipping candidate\n");
+    return nullptr;
   }
-    return ReplacementConst;
-  }
+
+  return ReplacementConst;
+}
 
 Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
   ValueToValueMapTy Mappings;
@@ -262,6 +312,11 @@ Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
     Argument *SpecArg = Clone->getArg(AV.ArgIndex);
     Type *ArgTy = SpecArg->getType();
     Constant *ReplacementConst = buildConstantFromBits(ArgTy, AV.ValueLo, AV.ValueHi);
+    if (!ReplacementConst) {
+      LLVM_DEBUG(dbgs() << "cloneAndSpecialize: failed to build constant for arg " << AV.ArgIndex
+                        << " in clone " << Clone->getName() << ", aborting clone\n");
+      return nullptr;
+    }
     SpecArg->replaceAllUsesWith(ReplacementConst);
   }
 
@@ -276,8 +331,19 @@ void ArgumentValueSpecialization::insertGuard(CallBase *CB, Function *Clone,
   IRBuilder<> Builder(CB);
   Value *Cond = nullptr;
   for (auto &AV : ArgSpecs) {
+    if (AV.ArgIndex >= CB->arg_size()) {
+      LLVM_DEBUG(dbgs() << "insertGuard: callsite has fewer args (" << CB->arg_size()
+                        << ") than specialization expects index " << AV.ArgIndex
+                        << ", skipping guard for callsite\n");
+      return;
+    }
     Value *ArgVal = CB->getArgOperand(AV.ArgIndex);
     Value *ConstVal = buildConstantFromBits(ArgVal->getType(), AV.ValueLo, AV.ValueHi);
+    if (!ConstVal) {
+      LLVM_DEBUG(dbgs() << "insertGuard: could not build constant for guard on arg " << AV.ArgIndex
+                        << ", skipping guard for callsite\n");
+      return;
+    }
     Value *Cmp = ArgVal->getType()->isFloatingPointTy()
                      ? Builder.CreateFCmpOEQ(ArgVal, ConstVal)
                      : Builder.CreateICmpEQ(ArgVal, ConstVal);
