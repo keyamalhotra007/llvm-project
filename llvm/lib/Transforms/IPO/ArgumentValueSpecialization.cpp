@@ -58,6 +58,12 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         if (!CB)
           continue;
 
+        if (llvm::any_of(CB->args(), [](Value *Arg) { return isa<Constant>(Arg); })) {
+          LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: skipping callsite in "
+                            << CB->getFunction()->getName() << " because an argument is already statically known\n");
+          continue;
+        }
+
         MDNode *IntMD = CB->getMetadata("int-args");
         MDNode *FpMD = CB->getMetadata("fp-args");
 
@@ -75,7 +81,6 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         
 
         for (unsigned ArgIndex = 0; ArgIndex < NumArgs; ++ArgIndex) {
-
           Type *ValueTy = FTy->getParamType(ArgIndex);
 
           // Only collect candidates for integer or floating-point formal
