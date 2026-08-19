@@ -134,12 +134,8 @@ unsigned llvm::computeSpecializationScore(
 
   double Benefit = (double(SizeSaved) + LatencyWeight * double(LatSaved)) *
                     (JointPercentBound / 100.0) * CallFreq;
-  // A combo of N args needs an N-way ANDed guard; each extra compare adds
-  // miss-branch overhead on the (100-JointPercentBound)% of calls that don't
-  // match. Scale by combo size so gratuitously large combos need a clearly
-  // bigger joint win to be worth it.
-  double GuardCost = GuardOverheadWeight *
-                      (1.0 - JointPercentBound / 100.0) * Substitutions.size();
+ 
+  double GuardCost = GuardOverheadWeight * Substitutions.size() * CallFreq;
 
   double Score = Benefit - GuardCost;
   if (Score <= 0.0)
@@ -242,8 +238,8 @@ Cost ArgSpecCostVisitor::getLatencySavingsForKnownConstants() {
     if (!I)
       continue;
 
-    uint64_t Weight = BFI.getBlockFreq(I->getParent()).getFrequency() /
-                      BFI.getEntryFreq().getFrequency();
+    double Weight = double(BFI.getBlockFreq(I->getParent()).getFrequency()) /
+                double(BFI.getEntryFreq().getFrequency());
 
     Cost Latency =
         Weight * TTI.getInstructionCost(I, TargetTransformInfo::TCK_Latency);
