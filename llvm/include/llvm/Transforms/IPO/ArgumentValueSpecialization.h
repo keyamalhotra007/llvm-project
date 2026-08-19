@@ -38,7 +38,9 @@ class ArgumentValueSpecialization
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 
-  Function *cloneAndSpecialize(const CloneKey &Key);
+  Function *cloneAndSpecialize(const CloneKey &Key, FunctionAnalysisManager &FAM);
+
+  bool canInsertGuard(CallBase *CB, ArrayRef<ArgSpecValue> ArgSpecs);
 
   void insertGuard(CallBase *CB, Function *Clone, ArrayRef<ArgSpecValue> ArgSpecs);
 

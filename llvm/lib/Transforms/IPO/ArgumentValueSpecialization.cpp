@@ -13,12 +13,15 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
 
-#define DEBUG_TYPE "argument-value-specialization"
 #include "llvm/Transforms/IPO/ArgumentValueSpecializationCost.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h" 
 #include "llvm/Transforms/Utils/Cloning.h"
 #include <cstdint>
@@ -26,10 +29,14 @@
 #include <optional>
 #include <tuple>
 
+#define DEBUG_TYPE "argument-value-specialization"
+
 using namespace llvm;
 
 namespace {
 
+static cl::opt<unsigned> MaxSpecInlineSize("avs-max-spec-inline-size",
+                                           cl::init(20), cl::Hidden);
 
 struct SpecializationCandidate {
   Function *Callee;
@@ -194,8 +201,9 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
     BlockFrequencyInfo &BFI = GetBFI(*Caller);
     BasicBlock *BB = CB->getParent();
 
+    uint64_t EntryFreq = BFI.getEntryFreq().getFrequency();
     double CallFreq = static_cast<double>(BFI.getBlockFreq(BB).getFrequency()) /
-                    static_cast<double>(BFI.getEntryFreq().getFrequency());
+              static_cast<double>(EntryFreq ? EntryFreq : 1);
 
 
     unsigned MaxArity = std::min<unsigned>(Hot.size(), MaxJointArity);
@@ -260,12 +268,15 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
       return A.ArgIndex < B.ArgIndex;
     });
 
+    if (!canInsertGuard(CB, Key.Args))
+      continue;
+
     Function *Clone = nullptr;
     auto CloneIt = ClonedFunctions.find(Key);
     if (CloneIt != ClonedFunctions.end()) {
       Clone = CloneIt->second;
     } else {
-      Clone = cloneAndSpecialize(Key); // now RAUWs every Args[i], not just one
+      Clone = cloneAndSpecialize(Key, FAM); // now RAUWs every Args[i], not just one
       if (!Clone)
         continue; // couldn't build a valid clone for this key
       ClonedFunctions[Key] = Clone;
@@ -310,14 +321,34 @@ Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64
   return ReplacementConst;
 }
 
-Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
-  ValueToValueMapTy Mappings;
-  Function *Clone = CloneFunction(Key.Callee, Mappings);
-
+Function *ArgumentValueSpecialization::cloneAndSpecialize(
+    const CloneKey &Key, FunctionAnalysisManager &FAM) {
+  Module &M = *Key.Callee->getParent();
   std::string Name = (Key.Callee->getName() + ".argspec").str();
   for (const ArgSpecValue &AV : Key.Args)
     Name += ("." + Twine(AV.ArgIndex) + "." + Twine(AV.ValueLo)).str();
-  Clone->setName(Name); 
+
+  Function *Clone = Function::Create(Key.Callee->getFunctionType(),
+                                     Key.Callee->getLinkage(), Name);
+  M.getFunctionList().push_back(Clone);
+
+  ValueToValueMapTy Mappings;
+  auto CloneArg = Clone->arg_begin();
+  for (const Argument &Arg : Key.Callee->args())
+    Mappings[&Arg] = &*CloneArg++;
+  SmallVector<ReturnInst *, 8> Returns;
+  CloneFunctionInto(Clone, Key.Callee, Mappings,
+                    CloneFunctionChangeType::GlobalChanges, Returns);
+
+  if (Key.Callee->hasLocalLinkage()) {
+    Clone->setLinkage(GlobalValue::InternalLinkage);
+  } else {
+    Clone->setLinkage(GlobalValue::LinkOnceODRLinkage);
+    Clone->setVisibility(GlobalValue::HiddenVisibility);
+    Comdat *C = M.getOrInsertComdat(Clone->getName());
+    C->setSelectionKind(Comdat::Any);
+    Clone->setComdat(C);
+  }
 
   for (const ArgSpecValue &AV : Key.Args) {
     Argument *SpecArg = Clone->getArg(AV.ArgIndex);
@@ -331,30 +362,48 @@ Function *ArgumentValueSpecialization::cloneAndSpecialize(const CloneKey &Key) {
     SpecArg->replaceAllUsesWith(ReplacementConst);
   }
 
+  FunctionPassManager FPM;
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  FPM.addPass(ADCEPass());
+  FPM.run(*Clone, FAM);
+
+  if (Clone->getInstructionCount() <= MaxSpecInlineSize)
+    Clone->addFnAttr(Attribute::AlwaysInline);
+
   return Clone;
 }
 
-void ArgumentValueSpecialization::insertGuard(CallBase *CB, Function *Clone,
-                                               ArrayRef<ArgSpecValue> ArgSpecs) {
+bool ArgumentValueSpecialization::canInsertGuard(CallBase *CB,
+                                                 ArrayRef<ArgSpecValue> ArgSpecs) {
   if (isa<InvokeInst>(CB))
-    return; // bailing on invoke
+    return false;
 
-  IRBuilder<> Builder(CB);
-  Value *Cond = nullptr;
   for (auto &AV : ArgSpecs) {
     if (AV.ArgIndex >= CB->arg_size()) {
       LLVM_DEBUG(dbgs() << "insertGuard: callsite has fewer args (" << CB->arg_size()
                         << ") than specialization expects index " << AV.ArgIndex
                         << ", skipping guard for callsite\n");
-      return;
+      return false;
     }
     Value *ArgVal = CB->getArgOperand(AV.ArgIndex);
     Value *ConstVal = buildConstantFromBits(ArgVal->getType(), AV.ValueLo, AV.ValueHi);
     if (!ConstVal) {
       LLVM_DEBUG(dbgs() << "insertGuard: could not build constant for guard on arg " << AV.ArgIndex
                         << ", skipping guard for callsite\n");
-      return;
+      return false;
     }
+  }
+  return true;
+}
+
+void ArgumentValueSpecialization::insertGuard(CallBase *CB, Function *Clone,
+                                               ArrayRef<ArgSpecValue> ArgSpecs) {
+  IRBuilder<> Builder(CB);
+  Value *Cond = nullptr;
+  for (auto &AV : ArgSpecs) {
+    Value *ArgVal = CB->getArgOperand(AV.ArgIndex);
+    Value *ConstVal = buildConstantFromBits(ArgVal->getType(), AV.ValueLo, AV.ValueHi);
     Value *Cmp = ArgVal->getType()->isFloatingPointTy()
                      ? Builder.CreateFCmpOEQ(ArgVal, ConstVal)
                      : Builder.CreateICmpEQ(ArgVal, ConstVal);
