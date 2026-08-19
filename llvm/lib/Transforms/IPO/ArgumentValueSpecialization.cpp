@@ -58,12 +58,6 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         if (!CB)
           continue;
 
-        if (llvm::any_of(CB->args(), [](Value *Arg) { return isa<Constant>(Arg); })) {
-          LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: skipping callsite in "
-                            << CB->getFunction()->getName() << " because an argument is already statically known\n");
-          continue;
-        }
-
         MDNode *IntMD = CB->getMetadata("int-args");
         MDNode *FpMD = CB->getMetadata("fp-args");
 
@@ -83,6 +77,8 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
         for (unsigned ArgIndex = 0; ArgIndex < NumArgs; ++ArgIndex) {
           Type *ValueTy = FTy->getParamType(ArgIndex);
 
+          bool ArgIsConstant = ArgIndex < CB->arg_size() && isa<Constant>(CB->getArgOperand(ArgIndex));
+
           // Only collect candidates for integer or floating-point formal
           // parameter types. Other types (pointers, aggregates, vectors,
           // etc.) are unsupported by buildConstantFromBits and should be
@@ -99,6 +95,11 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
               continue;
             }
 
+            if (ArgIsConstant) {
+              ++IntPos;  
+            continue;
+            }
+            
             auto *ValMeta = cast<ConstantAsMetadata>(IntMD->getOperand(IntPos * 2 + 1));
             auto *ValConst = cast<ConstantInt>(ValMeta->getValue());
             uint64_t Value = ValConst->getZExtValue();
@@ -119,6 +120,11 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
               LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: metadata for callee "
                                 << Callee->getName() << " does not cover fp-formal "
                                 << ArgIndex << ", skipping\n");
+              continue;
+            }
+
+            if (ArgIsConstant) {
+              ++FpPos;
               continue;
             }
 
