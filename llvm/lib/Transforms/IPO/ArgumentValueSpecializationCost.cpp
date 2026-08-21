@@ -9,17 +9,18 @@
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include <cmath>
 
 #define DEBUG_TYPE "argspec"
 
-
-
 using namespace llvm;
 
-static cl::opt<unsigned> ArgSpecHotnessThreshold(
+namespace llvm {
+cl::opt<unsigned> ArgSpecHotnessThreshold(
     "argspec-hotness-threshold", cl::init(50), cl::Hidden,
     cl::desc("Minimum hotness percentage required for an "
              "argument value candidate to be considered for specialization"));
+}
 
 static cl::opt<unsigned> ArgSpecMaxCodeSizeGrowth(
     "argspec-max-codesize-growth", cl::init(2), cl::Hidden,
@@ -132,18 +133,32 @@ unsigned llvm::computeSpecializationScore(
   constexpr double LatencyWeight = 1.0;      // TODO: tune
   constexpr double GuardOverheadWeight = 1.0; // TODO: tune
 
-  double Benefit = (double(SizeSaved) + LatencyWeight * double(LatSaved)) *
+  double Benefit = LatencyWeight * double(LatSaved) *
                     (JointPercentBound / 100.0) * CallFreq;
  
-  double GuardCost = GuardOverheadWeight * Substitutions.size() * CallFreq;
 
-  double Score = Benefit - GuardCost;
+  // Compares plus the (N-1) `and`s needed to combine them into one condition for a joint (multi-arg) guard.
+  unsigned GuardInstrCount = Substitutions.size() +
+      (Substitutions.size() > 1 ? Substitutions.size() - 1 : 0);
+
+  // The closer JointPercentBound is to 50%, the less predictable the guard branch is
+  double Mispredictability =
+      1.0 - std::abs((JointPercentBound / 100.0) - 0.5) * 2.0; // 1.0 @50%, 0.0 @0%/100%
+  constexpr double MispredictPenalty = 4.0; // TODO: tune
+
+  double GuardCost = GuardOverheadWeight * GuardInstrCount * CallFreq *
+                      (1.0 + MispredictPenalty * Mispredictability);
+
+    double Score = Benefit - GuardCost;
   if (Score <= 0.0)
     return 0;
 
+  // Scale before truncating to unsigned
+  constexpr double ScoreScale = 1000.0;
+
   if (OutCodeSizeSavings)
     *OutCodeSizeSavings = CodeSizeSavings;
-  return static_cast<unsigned>(Score);
+  return static_cast<unsigned>(Score * ScoreScale);
 }
 
 

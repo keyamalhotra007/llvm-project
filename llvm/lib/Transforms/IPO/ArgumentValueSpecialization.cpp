@@ -164,7 +164,7 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
   std::map<CloneKey, Function *> ClonedFunctions; //dedup cache: different callsites, same clone key -> share clone
 
   // for every CB which single argument index gives the maximum specialization benefit
-  constexpr double JointPercentFloor =50.0; //an arg only enters joint arg consideration if it's hot on its own
+  double JointPercentFloor = ArgSpecHotnessThreshold; //an arg only enters joint arg consideration if it's hot on its own
   constexpr unsigned MaxJointArity = 3; //combo size cap
 
   auto GetBFI = [&FAM](Function &F) -> BlockFrequencyInfo & {

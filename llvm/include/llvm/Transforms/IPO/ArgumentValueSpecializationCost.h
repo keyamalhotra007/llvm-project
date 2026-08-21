@@ -24,6 +24,8 @@
 
 namespace llvm {
 
+extern cl::opt<unsigned> ArgSpecHotnessThreshold;
+
 // Just a shorter abbreviation to improve indentation.
 using Cost = InstructionCost;
 
