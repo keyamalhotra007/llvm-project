@@ -812,22 +812,25 @@ void PerfScriptReader::buildArgumentValueProfile() {
     const PerfSample *Sample = Item.first.getPtr();
     uint64_t Count = Item.second;
 
-    uint64_t CallSitePC = Sample->IP;
-    if (!Binary->addressIsCall(CallSitePC))
-      continue;
+    // Sample->IP is wherever the PMU counter fired, not necessarily a call
+    // instruction. Use LBR branch source addresses for call-site detection.
+    for (const LBREntry &Entry : Sample->LBRStack) {
+      if (!Binary->addressIsCall(Entry.Source))
+        continue;
+      uint64_t CallSitePC = Entry.Source;
 
-    // Get (or create) the profile for this call site.
-    auto &Profile = ArgumentProfiles[CallSitePC];
+      // Get (or create) the profile for this call site.
+      auto &Profile = ArgumentProfiles[CallSitePC];
 
-    // Integer arguments.
-    for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot)
-      Profile.IntSlots[Slot][Sample->IntArgs[Slot]] += Count;
+      // Integer arguments.
+      for (size_t Slot = 0; Slot < Sample->IntArgs.size(); ++Slot)
+        Profile.IntSlots[Slot][Sample->IntArgs[Slot]] += Count;
 
-    // Floating-point arguments.
-    for (size_t Slot = 0; Slot < Sample->FpArgs.size(); ++Slot)
-      Profile.FpSlots[Slot][Sample->FpArgs[Slot]] += Count;
+      // Floating-point arguments.
+      for (size_t Slot = 0; Slot < Sample->FpArgs.size(); ++Slot)
+        Profile.FpSlots[Slot][Sample->FpArgs[Slot]] += Count;
+    }
   }
-
 }
 
 

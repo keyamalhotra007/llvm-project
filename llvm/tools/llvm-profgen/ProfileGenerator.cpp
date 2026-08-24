@@ -767,36 +767,41 @@ void ProfileGenerator::populateFunctionArgumentProfile(
     uint32_t Discriminator =
         getBaseDiscriminator(FrameVec.back().Location.Discriminator);
 
-
     for (uint32_t Slot = 0; Slot < sampleprof::MaxIntArgs; ++Slot) {
-      uint32_t MaxValueCount = 0, TotalCount = 0, MaxValue;
-
-        for (const auto &[Value, Count] : Profile.IntSlots[Slot]) {
-          TotalCount += Count;
-          if (Count > MaxValueCount){
-            MaxValueCount = Count;
-            MaxValue = Value;
-          }
-        }
-          uint8_t Percentage = static_cast<uint8_t>(std::round(100.0 * MaxValueCount / TotalCount));
-          FunctionProfile.addIntArgSample(LineOffset, Discriminator, Slot, MaxValue, Percentage);
-      
-    }
-
-    for (uint32_t Slot = 0; Slot < sampleprof::MaxFpArgs; ++Slot) {
-      uint32_t MaxValueCount = 0, TotalCount = 0;
-      sampleprof::FpValue MaxValue;
-
-      for (const auto &[FpVal, Count] : Profile.FpSlots[Slot]) {
-        sampleprof::FpValue Value{FpVal.Lo, FpVal.Hi};
+      uint32_t MaxValueCount = 0, TotalCount = 0, MaxValue = 0;
+      for (const auto &[Value, Count] : Profile.IntSlots[Slot]) {
         TotalCount += Count;
-        if (Count > MaxValueCount){
+        if (Count > MaxValueCount) {
           MaxValueCount = Count;
           MaxValue = Value;
         }
       }
-      uint8_t Percentage = static_cast<uint8_t>(std::round(100.0 * MaxValueCount / TotalCount));
-      FunctionProfile.addFpArgSample(LineOffset, Discriminator, Slot, MaxValue, Percentage);
+      if (TotalCount == 0)
+        continue;
+      uint8_t Percentage = static_cast<uint8_t>(
+          std::round(100.0 * MaxValueCount / TotalCount));
+      FunctionProfile.addIntArgSample(LineOffset, Discriminator, Slot, MaxValue,
+                                      Percentage);
+    }
+
+    for (uint32_t Slot = 0; Slot < sampleprof::MaxFpArgs; ++Slot) {
+      uint32_t MaxValueCount = 0, TotalCount = 0;
+      sampleprof::FpValue MaxValue{0, 0};
+
+      for (const auto &[FpVal, Count] : Profile.FpSlots[Slot]) {
+        sampleprof::FpValue Value{FpVal.Lo, FpVal.Hi};
+        TotalCount += Count;
+        if (Count > MaxValueCount) {
+          MaxValueCount = Count;
+          MaxValue = Value;
+        }
+      }
+      if (TotalCount == 0)
+        continue;
+      uint8_t Percentage = static_cast<uint8_t>(
+          std::round(100.0 * MaxValueCount / TotalCount));
+      FunctionProfile.addFpArgSample(LineOffset, Discriminator, Slot, MaxValue,
+                                     Percentage);
     }
 
   }

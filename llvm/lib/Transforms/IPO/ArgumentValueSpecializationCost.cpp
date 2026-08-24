@@ -50,6 +50,10 @@ static cl::opt<unsigned> MaxDiscoveryIterations(
                                 "when searching for transitive "
                                 "phis"));
 
+static cl::opt<bool> ArgSpecDumpScores(
+  "argspec-dump-scores", cl::init(false), cl::Hidden,
+  cl::desc("Dump argument specialization scores"));
+
 unsigned llvm::estimateFunctionCodeSize(Function &F, TargetTransformInfo &TTI) {
   InstructionCost Cost = 0;
   for (BasicBlock &BB : F)
@@ -144,12 +148,26 @@ unsigned llvm::computeSpecializationScore(
   // The closer JointPercentBound is to 50%, the less predictable the guard branch is
   double Mispredictability =
       1.0 - std::abs((JointPercentBound / 100.0) - 0.5) * 2.0; // 1.0 @50%, 0.0 @0%/100%
-  constexpr double MispredictPenalty = 4.0; // TODO: tune
+  constexpr double MispredictPenalty = 2.0; // TODO: tune
 
   double GuardCost = GuardOverheadWeight * GuardInstrCount * CallFreq *
                       (1.0 + MispredictPenalty * Mispredictability);
 
-    double Score = Benefit - GuardCost;
+  double Score = Benefit - GuardCost;
+  if (ArgSpecDumpScores) {
+    errs() << "ArgSpecialization: callee=" << Callee.getName()
+           << " ArgIndex=";
+    for (unsigned I = 0; I < Substitutions.size(); ++I) {
+      if (I)
+        errs() << ",";
+      errs() << Substitutions[I].Arg->getArgNo();
+    }
+    errs() << " LatSaved=" << LatSaved
+           << " DeadBlockLatency=" << Visitor.getDeadBlockLatency()
+           << " Benefit=" << Benefit
+           << " GuardCost=" << GuardCost
+           << " Score=" << Score << "\n";
+  }
   if (Score <= 0.0)
     return 0;
 
@@ -265,6 +283,7 @@ Cost ArgSpecCostVisitor::getLatencySavingsForKnownConstants() {
     TotalLatency += Latency;
   }
 
+  TotalLatency += DeadBlockLatency;
   return TotalLatency;
 }
 
@@ -285,13 +304,20 @@ bool ArgSpecCostVisitor::canEliminateSuccessor(BasicBlock *BB,
 
 Cost ArgSpecCostVisitor::estimateBasicBlocks(SmallVectorImpl<BasicBlock*> &WorkList) {
   Cost CodeSize = 0;
+  auto &BFI = GetBFI(*F);
+  uint64_t EntryFreq = BFI.getEntryFreq().getFrequency();
   while (!WorkList.empty()) {
     BasicBlock *BB = WorkList.pop_back_val();
     if (!DeadBlocks.insert(BB).second) continue;   // already counted
 
+    double Weight = double(BFI.getBlockFreq(BB).getFrequency()) /
+                    double(EntryFreq ? EntryFreq : 1);
+
     for (Instruction &I : *BB) {
       if (KnownConstants.contains(&I)) continue;    // don't double count already-folded insts
       CodeSize += TTI.getInstructionCost(&I, TargetTransformInfo::TCK_CodeSize);
+      DeadBlockLatency +=
+          Weight * TTI.getInstructionCost(&I, TargetTransformInfo::TCK_Latency);
     }
 
     for (BasicBlock *SuccBB : successors(BB))

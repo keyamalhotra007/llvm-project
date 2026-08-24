@@ -88,6 +88,8 @@ class ArgSpecCostVisitor : public InstVisitor<ArgSpecCostVisitor, Constant *> {
   // Basic blocks known to be unreachable after constant propagation.
   DenseSet<BasicBlock *> DeadBlocks;
 
+  Cost DeadBlockLatency = 0;
+
   // PHI nodes we have visited before.
   DenseSet<PHINode *> VisitedPHIs;
 
@@ -121,6 +123,8 @@ public:
   // It weights each instruction's latency cost by its relative execution frequency, obtained from BlockFrequencyInfo,
   // so instructions in hot paths matter more than those in cold paths.
   LLVM_ABI Cost getLatencySavingsForKnownConstants();
+
+  Cost getDeadBlockLatency() const { return DeadBlockLatency; }
 
 
 
