@@ -90,26 +90,33 @@ ArgumentValueSpecialization::run(Module &M, ModuleAnalysisManager &AM) {
           // parameter types. Other types (pointers, aggregates, vectors,
           // etc.) are unsupported by buildConstantFromBits and should be
           // skipped to avoid crashes.
-          if (ValueTy->isIntegerTy()) {
+          if (ValueTy->isIntegerTy() || ValueTy->isPointerTy()) {
             if (!IntMD)
               continue;
 
             unsigned NeededIdx = IntPos * 2 + 2;
             if (IntMD->getNumOperands() <= NeededIdx) {
               LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: metadata for callee "
-                                << Callee->getName() << " does not cover int-formal "
+                                << Callee->getName() << " does not cover int/formal "
                                 << ArgIndex << ", skipping\n");
               continue;
             }
 
             if (ArgIsConstant) {
-              ++IntPos;  
-            continue;
+              ++IntPos;
+              continue;
             }
-            
+
             auto *ValMeta = cast<ConstantAsMetadata>(IntMD->getOperand(IntPos * 2 + 1));
             auto *ValConst = cast<ConstantInt>(ValMeta->getValue());
             uint64_t Value = ValConst->getZExtValue();
+
+            if (ValueTy->isPointerTy() && Value != 0) {
+              LLVM_DEBUG(dbgs() << "ArgumentValueSpecialization: skipping non-null pointer candidate "
+                                << "for callee " << Callee->getName() << " arg " << ArgIndex << "\n");
+              ++IntPos;
+              continue;
+            }
 
             auto *PctMeta = cast<ConstantAsMetadata>(IntMD->getOperand(IntPos * 2 + 2));
             auto *PctConst = cast<ConstantInt>(PctMeta->getValue());
@@ -298,6 +305,13 @@ Constant *ArgumentValueSpecialization::buildConstantFromBits(Type *ArgTy, uint64
 
   if (ArgTy->isIntegerTy()) {
     ReplacementConst = ConstantInt::get(ArgTy, ValueLo);
+  } else if (ArgTy->isPointerTy()) {
+    if (ValueHi.has_value() || ValueLo != 0) {
+      LLVM_DEBUG(dbgs() << "buildConstantFromBits: rejecting non-null pointer candidate "
+                        << *ArgTy << ", skipping candidate\n");
+      return nullptr;
+    }
+    ReplacementConst = ConstantPointerNull::get(cast<PointerType>(ArgTy));
   } else if (ArgTy->isFloatTy() || ArgTy->isDoubleTy()) {
     if (!ValueHi.has_value()) {
       LLVM_DEBUG(dbgs() << "buildConstantFromBits: missing ValueHi for FP type " << *ArgTy

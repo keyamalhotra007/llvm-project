@@ -17,6 +17,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Transforms/IPO/ArgumentValueSpecialization.h"
 #include "llvm/Transforms/IPO/FunctionSpecialization.h"
 #include "llvm/Transforms/Utils/SCCPSolver.h"
 #include "gtest/gtest.h"
@@ -467,6 +468,18 @@ TEST_F(FunctionSpecializationTest, PhiNode) {
   Test = Visitor.getLatencySavingsForKnownConstants();
   EXPECT_EQ(Test, Ref);
   EXPECT_TRUE(Test > 0);
+}
+
+TEST(ArgumentValueSpecializationPointerTest, NullPointerAllowedNonNullRejected) {
+  LLVMContext Ctx;
+  Type *PtrTy = PointerType::getUnqual(Ctx);
+  ArgumentValueSpecialization Pass;
+
+  Constant *NullPtr = Pass.buildConstantFromBits(PtrTy, 0, std::nullopt);
+  EXPECT_TRUE(isa<ConstantPointerNull>(NullPtr));
+
+  Constant *NonNullPtr = Pass.buildConstantFromBits(PtrTy, 1, std::nullopt);
+  EXPECT_EQ(NonNullPtr, nullptr);
 }
 
 TEST_F(FunctionSpecializationTest, BinOp) {
