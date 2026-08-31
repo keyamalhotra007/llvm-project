@@ -22,17 +22,6 @@ cl::opt<unsigned> ArgSpecHotnessThreshold(
              "argument value candidate to be considered for specialization"));
 }
 
-static cl::opt<unsigned> ArgSpecMaxCodeSizeGrowth(
-    "argspec-max-codesize-growth", cl::init(2), cl::Hidden,
-    cl::desc("Maximum cumulative codesize growth (as a multiple of the "
-             "original function size) allowed per callee across all of its "
-             "specializations"));
-
-static cl::opt<unsigned> ArgSpecMaxAbsoluteSize(
-    "argspec-max-absolute-size", cl::init(500), cl::Hidden,
-    cl::desc("Cap on callee instruction count; never specialize a "
-             "function larger than this regardless of hotness"));
-
 static cl::opt<unsigned> MaxBlockPredecessors(
     "argspec-max-block-predecessors", cl::init(2), cl::Hidden, cl::desc(
     "The maximum number of predecessors a basic block can have to be "
@@ -61,7 +50,7 @@ unsigned llvm::estimateFunctionCodeSize(Function &F, TargetTransformInfo &TTI) {
       Cost += TTI.getInstructionCost(&I, TargetTransformInfo::TCK_CodeSize);
 
   if (!Cost.isValid())
-    return ArgSpecMaxAbsoluteSize + 1; // treat as too big to specialize
+    return std::numeric_limits<unsigned>::max(); // treat as too big to specialize
 
   int64_t Value = Cost.getValue();
   assert(Value >= 0 && "CodeSize and Latency cannot be negative");
